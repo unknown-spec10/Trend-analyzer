@@ -15,13 +15,14 @@ from typing import Any, List
 import pandas as pd
 import streamlit as st
 
-# Ensure env vars are loaded (keys, etc.)
+# MUST be called first before any other streamlit commands or imports that use streamlit
+st.set_page_config(page_title="Trend Analyzer", layout="wide")
+
+# Import after set_page_config to avoid conflicts
 from generic_analyst_agent.src import config  # noqa: F401
 from generic_analyst_agent.src.data_source import DataFrameDataSource
 from generic_analyst_agent.src.tools import DataQueryTool, search_for_probable_causes, summarize_text
 from generic_analyst_agent.src.agent_graph import create_agent_executor
-
-st.set_page_config(page_title="Trend Analyzer", layout="wide")
 
 st.title("Trend Analyzer")
 

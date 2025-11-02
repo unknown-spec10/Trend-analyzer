@@ -16,28 +16,32 @@ else:
     # Fallback to default search to support alternate setups
     load_dotenv(override=True)
 
-# For Streamlit Cloud: also check st.secrets if available
-try:
-    import streamlit as st
-    if hasattr(st, "secrets"):
-        # Overlay secrets from Streamlit Cloud (they take precedence)
-        for key in ["GROQ_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CSE_ID", "GEMINI_API_KEY"]:
-            if key in st.secrets:
-                os.environ[key] = st.secrets[key]
-except (ImportError, FileNotFoundError):
-    # Not running in Streamlit or secrets not configured
-    pass
+# Exported constants (read once at import time, with lazy Streamlit secrets loading)
+def _get_env_or_streamlit_secret(key: str) -> str | None:
+    """Get value from env var first, then try Streamlit secrets as fallback."""
+    value = os.getenv(key)
+    if value:
+        return value
+    
+    # Try Streamlit secrets if available (only in Streamlit Cloud)
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and key in st.secrets:
+            return st.secrets[key]
+    except (ImportError, FileNotFoundError, RuntimeError):
+        pass
+    
+    return None
 
-# Exported constants (read once at import time)
 # LLM provider (Groq)
-GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY: str | None = _get_env_or_streamlit_secret("GROQ_API_KEY")
 
 # Search provider (Google Custom Search JSON API)
-GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CSE_ID: str | None = os.getenv("GOOGLE_CSE_ID")  # aka "cx"
+GOOGLE_API_KEY: str | None = _get_env_or_streamlit_secret("GOOGLE_API_KEY")
+GOOGLE_CSE_ID: str | None = _get_env_or_streamlit_secret("GOOGLE_CSE_ID")  # aka "cx"
 
 # Google Gemini for summarization
-GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY: str | None = _get_env_or_streamlit_secret("GEMINI_API_KEY")
 
 # Optional: light validation/warnings without crashing import
 if not GROQ_API_KEY:
