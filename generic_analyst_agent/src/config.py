@@ -1,6 +1,10 @@
 """Configuration management.
 
 Single Responsibility: Load and expose configuration values (API keys, etc.).
+
+This module supports both local and cloud environments:
+- Local: Reads from .env file via python-dotenv
+- Streamlit Cloud: Reads from st.secrets (configured in Streamlit Cloud UI)
 """
 from __future__ import annotations
 
@@ -8,28 +12,45 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from the project-local .env (override any pre-set envs)
+# Detect environment: Local or Streamlit Cloud
+def _is_streamlit_cloud() -> bool:
+    """Check if running in Streamlit Cloud environment."""
+    try:
+        import streamlit as st
+        return hasattr(st, "secrets") and len(st.secrets) > 0
+    except (ImportError, FileNotFoundError, RuntimeError):
+        return False
+
+# Load environment variables from .env file (for local development)
 _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 if _ENV_PATH.exists():
     load_dotenv(dotenv_path=_ENV_PATH, override=True)
+    print(f"[Config] Loaded secrets from local .env file: {_ENV_PATH}")
 else:
-    # Fallback to default search to support alternate setups
+    # Fallback to default search
     load_dotenv(override=True)
 
-# Exported constants (read once at import time, with lazy Streamlit secrets loading)
 def _get_env_or_streamlit_secret(key: str) -> str | None:
-    """Get value from env var first, then try Streamlit secrets as fallback."""
+    """
+    Get configuration value with fallback chain:
+    1. Environment variable (set by .env in local, or system env)
+    2. Streamlit secrets (if running in Streamlit Cloud)
+    
+    Returns None if key not found in either location.
+    """
+    # First priority: Environment variables (works in both local and cloud)
     value = os.getenv(key)
     if value:
         return value
     
-    # Try Streamlit secrets if available (only in Streamlit Cloud)
-    try:
-        import streamlit as st
-        if hasattr(st, "secrets") and key in st.secrets:
-            return st.secrets[key]
-    except (ImportError, FileNotFoundError, RuntimeError):
-        pass
+    # Second priority: Streamlit Cloud secrets (only available in cloud)
+    if _is_streamlit_cloud():
+        try:
+            import streamlit as st
+            if key in st.secrets:
+                return st.secrets[key]
+        except (ImportError, FileNotFoundError, RuntimeError, KeyError):
+            pass
     
     return None
 
