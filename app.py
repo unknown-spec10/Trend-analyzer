@@ -12,23 +12,25 @@ from __future__ import annotations
 import io
 from typing import Any, List
 
-import requests
 import pandas as pd
 import streamlit as st
 
 # Ensure env vars are loaded (keys, etc.)
 from generic_analyst_agent.src import config  # noqa: F401
+from generic_analyst_agent.src.data_source import DataFrameDataSource
+from generic_analyst_agent.src.tools import DataQueryTool, search_for_probable_causes, summarize_text
+from generic_analyst_agent.src.agent_graph import create_agent_executor
 
-st.set_page_config(page_title="Root Cause Analyst", layout="wide")
+st.set_page_config(page_title="Trend Analyzer", layout="wide")
 
-st.title("Root Cause Analyst")
+st.title("Trend Analyzer")
 
 with st.sidebar:
     st.header("Data source")
     uploaded = st.file_uploader("Upload a CSV", type=["csv"]) 
     show_context = st.checkbox("Show internal/external context", value=False)
     st.caption("Tip: context shows intermediate facts and web summary.")
-    api_url = st.text_input("API base URL", value="http://localhost:8000", help="FastAPI server base URL")
+    st.markdown("---")
 
 # Session state
 if "df" not in st.session_state:
@@ -37,10 +39,12 @@ if "uploaded_bytes" not in st.session_state:
     st.session_state.uploaded_bytes = None
 if "uploaded_name" not in st.session_state:
     st.session_state.uploaded_name = None
+if "agent" not in st.session_state:
+    st.session_state.agent = None
 if "history" not in st.session_state:
     st.session_state.history = []  # type: ignore[assignment]
 
-# On upload: read bytes once, parse for preview, persist bytes for API call
+# On upload: read bytes once, parse for preview, build agent
 if uploaded is not None:
     try:
         file_bytes = uploaded.read()
@@ -48,6 +52,13 @@ if uploaded is not None:
         st.session_state.uploaded_name = uploaded.name or "data.csv"
         df = pd.read_csv(io.BytesIO(file_bytes))
         st.session_state.df = df
+        
+        # Build agent with uploaded data
+        ds = DataFrameDataSource(df)
+        dq = DataQueryTool(ds)
+        tools = [dq.query_data, search_for_probable_causes, summarize_text]
+        st.session_state.agent = create_agent_executor(tools)
+        
         st.success(f"Loaded CSV with {df.shape[0]:,} rows and {df.shape[1]} columns")
         with st.expander("Preview (first 10 rows)"):
             st.dataframe(df.head(10))
@@ -61,17 +72,17 @@ chat_container = st.container()
 with st.form("qa_form", clear_on_submit=True):
     prompt_val = st.text_input(
         "Your question",
-        placeholder="Why did Electronics claims spike in March 2025?",
+        placeholder="Why did claims spike in March 2025?",
         key="prompt_input",
     )
     ask = st.form_submit_button("Ask")
 
-# When Ask is clicked, call backend API
+# When Ask is clicked, run agent locally
 if ask:
     prompt_val = (prompt_val or "").strip()
     if not prompt_val:
         st.warning("Please enter a question.")
-    elif st.session_state.uploaded_bytes is None:
+    elif st.session_state.agent is None:
         st.warning("Please upload a CSV first.")
     else:
         # Prevent duplicate consecutive entries
@@ -81,46 +92,37 @@ if ask:
         ):
             # Ignore duplicate consecutive question
             pass
-
-        try:
-            files = {
-                "file": (
-                    st.session_state.uploaded_name or "data.csv",
-                    io.BytesIO(st.session_state.uploaded_bytes),
-                    "text/csv",
-                )
-            }
-            form = {
-                "question": prompt_val,
-                "show_context": str(show_context).lower(),
-            }
-            resp = requests.post(
-                f"{api_url.rstrip('/')}/analyze_upload",
-                files=files,
-                data=form,
-                timeout=300,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"API error {resp.status_code}: {resp.text}")
-            result = resp.json()
-        except Exception as e:
-            st.error(f"API request failed: {e}")
-            st.stop()
-
-        record = {
-            "question": prompt_val,
-            "final_answer": result.get("final_answer"),
-            "internal_fact": result.get("internal_fact") if show_context else None,
-            "internal_context": result.get("internal_context") if show_context else None,
-            "external_context": result.get("external_context") if show_context else None,
-        }
-        if not (
-            len(st.session_state.history) > 0
-            and st.session_state.history[-1].get("question") == record["question"]
-            and st.session_state.history[-1].get("final_answer") == record["final_answer"]
-        ):
-            st.session_state.history.append(record)
-        # Form has clear_on_submit=True; no manual clearing or rerun required
+        else:
+            # Run agent with progress indicator
+            with st.spinner("Analyzing..."):
+                try:
+                    # Build state with conversation context
+                    messages: List[Any] = []
+                    for h in st.session_state.history:
+                        messages.append({"type": "human", "content": h["question"]})
+                    messages.append({"type": "human", "content": prompt_val})
+                    
+                    state = {"messages": messages}
+                    result = st.session_state.agent.invoke(state)
+                    
+                    record = {
+                        "question": prompt_val,
+                        "final_answer": result.get("final_answer"),
+                        "internal_fact": result.get("internal_fact") if show_context else None,
+                        "internal_context": result.get("internal_context") if show_context else None,
+                        "external_context": result.get("external_context") if show_context else None,
+                    }
+                    if not (
+                        len(st.session_state.history) > 0
+                        and st.session_state.history[-1].get("question") == record["question"]
+                        and st.session_state.history[-1].get("final_answer") == record["final_answer"]
+                    ):
+                        st.session_state.history.append(record)
+                except Exception as e:
+                    st.error(f"Analysis failed: {e}")
+                    import traceback
+                    with st.expander("Error details"):
+                        st.code(traceback.format_exc())
 
 # Render history
 with chat_container:
