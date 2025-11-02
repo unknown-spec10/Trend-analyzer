@@ -1,0 +1,93 @@
+# ---- Python build artifacts ----
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions / debugging
+*.so
+*.pyd
+*.pdb
+
+# Packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.pytest_cache/
+.cache/
+.mypy_cache/
+.pytype/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environments (local)
+.env
+.env.*
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+myenv/
+
+# IDE/editor
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Streamlit
+# Keep secrets local; configure them in Streamlit Cloud UI instead.
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+.streamlit/**/secrets.toml
+
+# Data caches/exports (adjust to your needs)
+*.parquet
+*.feather
+*.arrow
+*.orc
+*.zip
+*.gz
+*.bz2
+*.xz
+
+# End of file

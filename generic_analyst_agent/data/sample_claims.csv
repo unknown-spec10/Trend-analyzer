@@ -1,0 +1,51 @@
+claim_id,date_of_incident,city,product_category,problem_reported,claim_amount
+1001,2024-11-12,Austin,Home,Water leak damaged flooring,2400.50
+1002,2024-12-05,Dallas,Auto,Fender bender,1200.00
+1003,2025-01-09,Houston,Electronics,TV won't power on,450.00
+1004,2025-01-14,San Antonio,Home,Roof shingles blown off,3100.00
+1005,2025-01-22,Houston,Home,Pipe burst,5200.00
+1006,2025-02-02,Austin,Electronics,Laptop screen cracked,800.00
+1007,2025-02-11,Houston,Auto,Rear-end collision,2100.00
+1008,2025-02-18,Dallas,Electronics,Smartphone battery swelling,300.00
+1009,2025-02-24,Houston,Home,AC unit failure,1500.00
+1010,2025-03-01,Houston,Electronics,Smartphone battery swelling,280.00
+1011,2025-03-02,Houston,Electronics,TV backlight failure,520.00
+1012,2025-03-03,Houston,Electronics,Laptop motherboard issue,950.00
+1013,2025-03-04,Houston,Electronics,Tablet won't charge,310.00
+1014,2025-03-05,Houston,Electronics,Game console overheating,430.00
+1015,2025-03-06,Houston,Electronics,Headphones no audio,120.00
+1016,2025-03-07,Houston,Electronics,Smartwatch display ghosting,260.00
+1017,2025-03-08,Houston,Electronics,Camera sensor failure,780.00
+1018,2025-03-09,Houston,Electronics,Router intermittent drops,180.00
+1019,2025-03-10,Houston,Electronics,Monitor flickering,350.00
+1020,2025-03-11,Houston,Electronics,Printer paper jam damage,140.00
+1021,2025-03-12,Houston,Electronics,Smart TV OS crash,600.00
+1022,2025-03-13,Houston,Electronics,External HDD failure,220.00
+1023,2025-03-14,Houston,Electronics,Drone motor failure,650.00
+1024,2025-03-15,Houston,Electronics,Bluetooth speaker distortion,130.00
+1025,2025-03-16,Houston,Electronics,Smartphone battery swelling,295.00
+1026,2025-03-17,Houston,Electronics,Laptop battery drain,410.00
+1027,2025-03-18,Houston,Electronics,VR headset tracking issues,720.00
+1028,2025-03-19,Houston,Electronics,Smartphone battery swelling,305.00
+1029,2025-03-20,Houston,Electronics,Smartphone battery swelling,315.00
+1030,2025-03-21,Austin,Home,Tree limb damage to fence,900.00
+1031,2025-03-22,Dallas,Auto,Windshield crack,450.00
+1032,2025-03-23,San Antonio,Electronics,Microwave stopped heating,200.00
+1033,2025-04-02,Houston,Electronics,TV screen lines,500.00
+1034,2025-04-05,Dallas,Home,Garage door spring break,650.00
+1035,2025-04-11,Houston,Auto,Side mirror damaged,280.00
+1036,2025-04-16,Austin,Electronics,Laptop keyboard failure,320.00
+1037,2025-04-22,San Antonio,Home,Washer pump failure,420.00
+1038,2025-05-03,Houston,Home,Storm window damage,1300.00
+1039,2025-05-09,Dallas,Electronics,AirPods lost connection,160.00
+1040,2025-05-12,Austin,Auto,Hit-and-run paint damage,700.00
+1041,2025-05-18,Houston,Electronics,Smartphone battery swelling,330.00
+1042,2025-06-01,San Antonio,Home,Water heater failure,1100.00
+1043,2025-06-08,Houston,Electronics,Game console HDMI port,260.00
+1044,2025-06-15,Dallas,Auto,Flat tire damage,180.00
+1045,2025-07-04,Houston,Home,Firework ash damage to deck,900.00
+1046,2025-07-13,Austin,Electronics,Smartphone battery swelling,300.00
+1047,2025-07-21,Houston,Electronics,Smartphone battery swelling,340.00
+1048,2025-08-02,Dallas,Home,Roof leak after storm,2400.00
+1049,2025-08-16,Houston,Auto,Radiator failure,1300.00
+1050,2025-09-09,San Antonio,Electronics,Fridge compressor issue,850.00
