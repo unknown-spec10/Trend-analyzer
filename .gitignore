@@ -89,5 +89,6 @@ logs/
 *.gz
 *.bz2
 *.xz
+./data/
 
 # End of file

@@ -1,0 +1,3 @@
+# System packages for Streamlit Cloud
+# Empty for now - add system dependencies here if needed
+# e.g., cmake, build-essential, etc.

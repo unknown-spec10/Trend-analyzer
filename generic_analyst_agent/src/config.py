@@ -16,6 +16,18 @@ else:
     # Fallback to default search to support alternate setups
     load_dotenv(override=True)
 
+# For Streamlit Cloud: also check st.secrets if available
+try:
+    import streamlit as st
+    if hasattr(st, "secrets"):
+        # Overlay secrets from Streamlit Cloud (they take precedence)
+        for key in ["GROQ_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CSE_ID", "GEMINI_API_KEY"]:
+            if key in st.secrets:
+                os.environ[key] = st.secrets[key]
+except (ImportError, FileNotFoundError):
+    # Not running in Streamlit or secrets not configured
+    pass
+
 # Exported constants (read once at import time)
 # LLM provider (Groq)
 GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
