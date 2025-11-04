@@ -161,7 +161,7 @@ Respond with ONLY the search query, no explanation.
         return 0.0
 
     def detect_clarification_need(state: AgentState) -> AgentState:
-        """Detect if the question references previous conversation context."""
+        """Detect if the question references previous conversation context, and validate question quality."""
         msgs = state.get("messages", [])
         question: str = ""
         for m in reversed(msgs):
@@ -178,6 +178,76 @@ Respond with ONLY the search query, no explanation.
             if isinstance(m, HumanMessage):
                 question = str(m.content)
                 break
+        
+        # Validate question quality
+        import re
+        question_stripped = question.strip()
+        
+        # Check for invalid/meaningless input
+        is_valid = True
+        validation_message = None
+        
+        if not question_stripped:
+            is_valid = False
+            validation_message = "Please enter a question."
+        elif len(question_stripped) < 3:
+            is_valid = False
+            validation_message = "Your question is too short. Please provide more detail."
+        elif re.match(r'^[^a-zA-Z0-9\s]+$', question_stripped):
+            # Only special characters/punctuation
+            is_valid = False
+            validation_message = "Your input appears to be random characters. Please ask a clear question about your data."
+        elif not re.search(r'[a-zA-Z]', question_stripped):
+            # No alphabetic characters at all
+            is_valid = False
+            validation_message = "Please use words to ask your question."
+        elif len(re.findall(r'\b[a-zA-Z]{2,}\b', question_stripped)) == 0:
+            # No valid words (at least 2 letters)
+            is_valid = False
+            validation_message = "Your input doesn't contain recognizable words. Please ask a clear question."
+        else:
+            # Check for keyboard mashing (e.g., "lklk;l", "asdfghjkl")
+            # Detect: high ratio of consonants, repeated patterns, no vowel-consonant alternation
+            words = re.findall(r'\b[a-zA-Z]{3,}\b', question_stripped.lower())
+            if words:
+                # Check if it looks like random typing
+                has_meaningful_word = False
+                common_words = {'what', 'which', 'who', 'where', 'when', 'why', 'how', 'show', 'get', 'find', 
+                               'the', 'is', 'are', 'was', 'were', 'have', 'has', 'had', 'do', 'does', 'did',
+                               'can', 'could', 'would', 'should', 'may', 'might', 'must', 'will', 'shall',
+                               'top', 'bottom', 'highest', 'lowest', 'most', 'least', 'total', 'sum', 'average',
+                               'region', 'city', 'state', 'country', 'year', 'month', 'day', 'data', 'value'}
+                
+                for word in words:
+                    # Check if it's a common word
+                    if word in common_words:
+                        has_meaningful_word = True
+                        break
+                    
+                    # Check for reasonable vowel-consonant ratio (20-60% vowels is typical)
+                    vowels = len([c for c in word if c in 'aeiou'])
+                    consonants = len([c for c in word if c.isalpha() and c not in 'aeiou'])
+                    if consonants > 0:
+                        vowel_ratio = vowels / (vowels + consonants)
+                        if 0.2 <= vowel_ratio <= 0.6 and vowels >= 1:
+                            has_meaningful_word = True
+                            break
+                
+                if not has_meaningful_word and len(words) <= 2:
+                    is_valid = False
+                    validation_message = "Your input appears to be random typing. Please ask a clear question about your data."
+        
+        # If invalid, return error state
+        if not is_valid:
+            logger.warning(f"Invalid question detected: '{question_stripped}'")
+            return {
+                **state,
+                "needs_clarification": True,
+                "final_answer": f"❌ Invalid Question\n\n{validation_message}\n\nExamples of valid questions:\n• Which region has the highest claims?\n• What is the average value by category?\n• Show me the top 5 records\n• What trends do you see in the data?",
+                "messages": state.get("messages", []) + [
+                    {"type": "ai", "content": validation_message}
+                ],
+            }
         
         conversation_history = state.get("conversation_history", [])
         
@@ -520,7 +590,14 @@ Format: YES|reason or NO|reason
             "previous_facts": previous_facts,
         }
 
-    # Conditional routing function
+    # Conditional routing functions
+    def route_after_clarification(state: AgentState) -> str:
+        """Route to END if validation failed, otherwise continue to data tool."""
+        # If final_answer is already set by validation, skip to END
+        if state.get("final_answer") and state.get("needs_clarification"):
+            return "END"
+        return "call_data_tool"
+    
     def route_after_decision(state: AgentState) -> str:
         """Route to search or directly to synthesis based on decision."""
         if state.get("needs_external_search", True):
@@ -536,7 +613,14 @@ Format: YES|reason or NO|reason
     graph.add_node("synthesize_answer", synthesize_answer)
 
     graph.set_entry_point("detect_clarification_need")
-    graph.add_edge("detect_clarification_need", "call_data_tool")
+    graph.add_conditional_edges(
+        "detect_clarification_need",
+        route_after_clarification,
+        {
+            "call_data_tool": "call_data_tool",
+            "END": END,
+        }
+    )
     graph.add_edge("call_data_tool", "decide_if_search_needed")
     graph.add_conditional_edges(
         "decide_if_search_needed",
