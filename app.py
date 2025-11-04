@@ -27,6 +27,25 @@ from generic_analyst_agent.src.session_cache import get_cache, generate_dataset_
 
 st.title("Trend Analyzer")
 
+# Session state - Initialize FIRST before any access
+if "df" not in st.session_state:
+    st.session_state.df = None
+if "uploaded_bytes" not in st.session_state:
+    st.session_state.uploaded_bytes = None
+if "uploaded_name" not in st.session_state:
+    st.session_state.uploaded_name = None
+if "agent" not in st.session_state:
+    st.session_state.agent = None
+if "history" not in st.session_state:
+    st.session_state.history = []  # type: ignore[assignment]
+if "stats" not in st.session_state:
+    st.session_state.stats = None
+if "dataset_signature" not in st.session_state:
+    st.session_state.dataset_signature = None
+
+# Initialize cache (1 hour TTL)
+cache = get_cache(ttl_seconds=3600)
+
 with st.sidebar:
     st.header("Data source")
     uploaded = st.file_uploader("Upload a CSV", type=["csv"]) 
@@ -57,25 +76,6 @@ with st.sidebar:
                     st.session_state.suggested_question = question
                     st.rerun()
         st.markdown("---")
-
-# Session state
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "uploaded_bytes" not in st.session_state:
-    st.session_state.uploaded_bytes = None
-if "uploaded_name" not in st.session_state:
-    st.session_state.uploaded_name = None
-if "agent" not in st.session_state:
-    st.session_state.agent = None
-if "history" not in st.session_state:
-    st.session_state.history = []  # type: ignore[assignment]
-if "stats" not in st.session_state:
-    st.session_state.stats = None
-if "dataset_signature" not in st.session_state:
-    st.session_state.dataset_signature = None
-
-# Initialize cache (1 hour TTL)
-cache = get_cache(ttl_seconds=3600)
 
 # On upload: read bytes once, parse for preview, build agent
 if uploaded is not None:
