@@ -382,6 +382,78 @@ Respond with ONLY the expanded question, no explanation.
         # Extract the plain-English summary from struct if available
         internal_summary = struct.get("summary", "")
 
+        # Validate that we got meaningful data from the dataset
+        # Check if the result is empty, trivial, or indicates the question doesn't match the data
+        is_valid_result = True
+        error_message = None
+        
+        # Check 1: Explicit error metric (LLM detected mismatch)
+        if metric == "error":
+            is_valid_result = False
+            error_message = "Question doesn't match dataset columns"
+        
+        # Check 2: No meaningful value extracted
+        elif value is None or (isinstance(value, str) and value.lower() in ['none', 'null', 'unknown', 'n/a', '']):
+            is_valid_result = False
+            error_message = "Unable to find relevant data"
+        
+        # Check 3: Metric is unknown (indicates data extraction failed)
+        elif metric == "unknown" or metric is None:
+            is_valid_result = False
+            error_message = "Unable to understand question in context of dataset"
+        
+        # Check 4: Empty or trivial summary
+        elif not internal_summary or len(internal_summary.strip()) < 10:
+            is_valid_result = False
+            error_message = "No meaningful information extracted from dataset"
+        
+        # Check 5: Summary indicates error or inability to answer
+        elif any(phrase in internal_summary.lower() for phrase in [
+            'unable to', 'cannot find', 'no data', 'does not exist', 'not found',
+            'not available', 'no column', 'no information', 'not present in'
+        ]):
+            is_valid_result = False
+            error_message = "Question doesn't match available data columns"
+        
+        # If validation failed, return error state
+        if not is_valid_result:
+            logger.warning(f"Invalid data extraction for question. Reason: {error_message}")
+            
+            # Get the original human question for error message
+            original_question = question
+            for m in reversed(msgs):
+                if isinstance(m, dict) and m.get("type") == "human":
+                    original_question = m.get("content")
+                    break
+                if isinstance(m, HumanMessage):
+                    original_question = m.content
+                    break
+            
+            return {
+                "messages": msgs + [{"type": "ai", "content": f"Data validation failed: {error_message}"}],
+                "internal_fact": struct,
+                "internal_context": None,
+                "internal_summary": None,
+                "final_answer": f"""❌ Invalid Question for This Dataset
+
+{error_message}. Your question might be asking about:
+• Data columns that don't exist in this dataset
+• Concepts or metrics not present in the data
+• Information that requires external knowledge
+
+**Suggestions:**
+1. Check what columns are available in your dataset
+2. Rephrase your question using column names from the data
+3. Click on suggested questions in the sidebar for examples
+
+**Example Valid Questions:**
+• What is the total/average of [numeric column]?
+• Which [category] has the highest [value]?
+• Show me the distribution of [column]
+• Compare [column1] across different [column2]""",
+                "needs_clarification": True,
+            }
+
         return {
             "messages": msgs + [
                 {"type": "ai", "content": f"Internal fact found: {struct}"},
@@ -598,6 +670,13 @@ Format: YES|reason or NO|reason
             return "END"
         return "call_data_tool"
     
+    def route_after_data_tool(state: AgentState) -> str:
+        """Route to END if data extraction failed, otherwise continue to decision."""
+        # If final_answer is set after data_tool (validation failed), skip to END
+        if state.get("final_answer") and state.get("needs_clarification"):
+            return "END"
+        return "decide_if_search_needed"
+    
     def route_after_decision(state: AgentState) -> str:
         """Route to search or directly to synthesis based on decision."""
         if state.get("needs_external_search", True):
@@ -621,7 +700,14 @@ Format: YES|reason or NO|reason
             "END": END,
         }
     )
-    graph.add_edge("call_data_tool", "decide_if_search_needed")
+    graph.add_conditional_edges(
+        "call_data_tool",
+        route_after_data_tool,
+        {
+            "decide_if_search_needed": "decide_if_search_needed",
+            "END": END,
+        }
+    )
     graph.add_conditional_edges(
         "decide_if_search_needed",
         route_after_decision,

@@ -83,10 +83,24 @@ class DataQueryTool:
 You are an expert data analyst. Given a pandas DataFrame named `df`, write Python code that:
 
 CRITICAL REQUIREMENTS:
-1. Analyze the ACTUAL columns in the schema to understand the dataset domain
-2. Answer the user's question using ONLY the data present in `df`
-3. Build a STRUCTURED dictionary named `result` with these exact keys:
+1. FIRST check if the question's key terms match the ACTUAL columns in the schema
+2. If the question asks about columns/concepts NOT in the dataset, return an error result
+3. Analyze the ACTUAL columns in the schema to understand the dataset domain
+4. Answer the user's question using ONLY the data present in `df`
+5. Build a STRUCTURED dictionary named `result` with these exact keys:
    {{"metric": str, "value": number, "period": str, "segment": str, "unit": str, "details": dict, "summary": str}}
+
+ERROR HANDLING FOR MISMATCHED QUESTIONS:
+If the user asks about data that doesn't exist (e.g., "stock price" when there's no stock column), return:
+{{
+    "metric": "error",
+    "value": None,
+    "period": "unknown",
+    "segment": "unknown",
+    "unit": "unknown",
+    "details": {{}},
+    "summary": "Unable to answer: question asks about data not present in this dataset"
+}}
 
 FIELD SPECIFICATIONS:
 - `metric`: Short name describing what was measured (e.g., "regional_distribution", "gender_breakdown")
