@@ -106,13 +106,29 @@ DATASET CONTEXT (adapt your analysis to these columns):
 - Date columns: {date_cols}
 
 CODE RULES:
-- Print ONLY: print(json.dumps(result))
-- Do NOT import anything (json, pd already available)
-- Do NOT use print for anything else
+- Build a dict named `result` with ALL required keys (metric, value, period, segment, unit, details, summary)
+- At the end, print ONLY: print(json.dumps(result))
+- Do NOT import anything (json, pd, int, float, str, dict already available)
+- Do NOT use print for anything else (no debug prints)
 - Do NOT write comments, explanations, or markdown
 - Use df.columns to verify column names before filtering
 - Handle missing values gracefully with .dropna() or .fillna()
-- Output ONLY executable Python code
+- Ensure `value` is numeric (use int() or float() to convert)
+- Output ONLY executable Python code (no ```python fences, no explanations)
+
+EXAMPLE CODE STRUCTURE:
+# Find the answer using pandas
+result_value = ...  # your calculation
+result = {{
+    "metric": "descriptive_name",
+    "value": int(result_value),
+    "period": "full_dataset",
+    "segment": "category_name",
+    "unit": "records",
+    "details": {{}},
+    "summary": "Plain English answer"
+}}
+print(json.dumps(result))
 
 User question:
 {user_query}
