@@ -72,35 +72,55 @@ class DataQueryTool:
         buf = io.StringIO()
         df.info(buf=buf)
         schema_info = buf.getvalue()
-        head_str = df.head(5).to_string(index=False)
+        head_str = df.head(10).to_string(index=False)
+        
+        # Detect column types to give better guidance
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        date_cols = df.select_dtypes(include=['datetime']).columns.tolist()
+        
         instructions = f"""
-You are a helpful data analyst. Given a pandas DataFrame named `df`, write Python code that:
-- Computes the answer to the user's question using idiomatic pandas only.
-- Builds a STRUCTURED dictionary named `result` with keys exactly: 
-    {{"metric": str, "value": number, "period": str, "segment": str, "unit": str}}
-- The `metric` should be a short descriptive name (e.g., "regional_claims", "gender_distribution").
-- The `value` must be numeric (count, sum, or average) matching the question's intent.
-- The `period` should be a human-readable time window if the data has dates; otherwise use "full_dataset" or "all_records".
-- The `segment` should capture the most relevant category, region, demographic, or slice based on the question.
-  Examples:
-  * For regions: "southeast", "northwest", etc.
-  * For demographics: "male", "female", age groups
-  * For categories: product types, claim types, etc.
-- The `unit` should be appropriate (e.g., "claims", "records", "USD", "patients").
-- If helpful, include optional `details` dict with additional breakdowns (e.g., by gender, age, subcategory).
-- Finally, print the JSON-serialized `result` using: print(json.dumps(result)).
-- Do NOT write any import statements; the `json` module is already available.
-- Never read/write files, never access network or environment.
-- You may use `pd` if needed, but prefer DataFrame methods on `df`.
-- Output ONLY the code. No explanations. No markdown fences.
+You are an expert data analyst. Given a pandas DataFrame named `df`, write Python code that:
+
+CRITICAL REQUIREMENTS:
+1. Analyze the ACTUAL columns in the schema to understand the dataset domain
+2. Answer the user's question using ONLY the data present in `df`
+3. Build a STRUCTURED dictionary named `result` with these exact keys:
+   {{"metric": str, "value": number, "period": str, "segment": str, "unit": str, "details": dict, "summary": str}}
+
+FIELD SPECIFICATIONS:
+- `metric`: Short name describing what was measured (e.g., "regional_distribution", "gender_breakdown")
+- `value`: PRIMARY numeric answer (count, sum, average, percentage) - this is the MAIN result
+- `period`: Time window if dates exist; otherwise "full_dataset" or describe the data scope
+- `segment`: The primary grouping/category/demographic that answers the question
+  * Inspect the user's question - if they ask about "region", use the region with highest value
+  * If they ask about "gender" or "sex", use the dominant gender
+  * If they ask about multiple dimensions, pick the MOST relevant one as segment
+- `unit`: Appropriate unit ("records", "claims", "patients", "USD", "percentage", etc.)
+- `details`: Dict with secondary breakdowns (e.g., {{"by_gender": {{"male": 120, "female": 95}}}})
+- `summary`: 1-2 sentence plain English answer to the question with key numbers
+
+DATASET CONTEXT (adapt your analysis to these columns):
+- Numeric columns: {numeric_cols}
+- Categorical columns: {categorical_cols}
+- Date columns: {date_cols}
+
+CODE RULES:
+- Print ONLY: print(json.dumps(result))
+- Do NOT import anything (json, pd already available)
+- Do NOT use print for anything else
+- Do NOT write comments, explanations, or markdown
+- Use df.columns to verify column names before filtering
+- Handle missing values gracefully with .dropna() or .fillna()
+- Output ONLY executable Python code
 
 User question:
 {user_query}
 
-DataFrame schema (df.info()):
+DataFrame schema:
 {schema_info}
 
-Data sample (df.head()):
+Data sample (first 10 rows):
 {head_str}
         """
         return textwrap.dedent(instructions).strip()
@@ -108,15 +128,33 @@ Data sample (df.head()):
     def _run_query(self, user_query: str) -> Any:
         df = self._data_source.get_data()
         prompt = self._build_prompt(user_query, df)
-        resp = self._llm.invoke(prompt)  # type: ignore[attr-defined]
-        code = _extract_code_blocks(getattr(resp, "content", str(resp)))
-        code = self._sanitize_generated_code(code)
-        result = self._execute_code(code, df)
-        # If result is not a structured dict, provide a deterministic fallback
-        if not isinstance(result, dict):
-            fallback = self._fallback_fact(user_query, df)
-            return fallback
-        return result
+        
+        # Try up to 2 times if LLM fails to generate valid code
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            try:
+                resp = self._llm.invoke(prompt)  # type: ignore[attr-defined]
+                code = _extract_code_blocks(getattr(resp, "content", str(resp)))
+                code = self._sanitize_generated_code(code)
+                result = self._execute_code(code, df)
+                
+                # If result is a valid structured dict, return it
+                if isinstance(result, dict) and "metric" in result:
+                    return result
+                
+                # If we got an error message, try again
+                if isinstance(result, str) and "Error" in result and attempt < max_attempts - 1:
+                    # Add error feedback to prompt for retry
+                    prompt += f"\n\nPREVIOUS ATTEMPT FAILED:\n{result}\n\nPlease fix the code and try again."
+                    continue
+                    
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    prompt += f"\n\nPREVIOUS ATTEMPT FAILED:\n{str(e)}\n\nPlease fix the code and try again."
+                    continue
+        
+        # If all attempts fail, use generic fallback
+        return self._fallback_fact(user_query, df)
 
     def _sanitize_generated_code(self, code: str) -> str:
         """Remove unsafe or disallowed constructs from model-generated code.
@@ -192,125 +230,62 @@ Data sample (df.head()):
         return printed
 
     def _fallback_fact(self, user_query: str, df: pd.DataFrame) -> dict[str, Any]:
-        """Adaptive fallback when the LLM produces an unhelpful result.
-
-        Attempts to answer the user's query using heuristics based on available columns.
+        """Generic fallback when LLM code generation fails.
+        
+        Provides basic dataset statistics without making assumptions about domain.
         """
-        # Try to locate standard column names
-        cols = {c.lower(): c for c in df.columns}
-        
-        # Detect dataset type and adapt accordingly
-        # Medical insurance dataset: age, sex, bmi, region, charges, smoker, children
-        if "region" in cols and "charges" in cols and "sex" in cols:
-            return self._fallback_medical_insurance(user_query, df, cols)
-        
-        # Product/incident claims dataset: product_category, date_of_incident, claim_amount
-        required = ["product_category", "date_of_incident", "claim_amount"]
-        if all(name in cols for name in required):
-            return self._fallback_product_claims(user_query, df, cols)
-        
-        # Generic fallback
-        return {
-            "error": f"Could not compute a fallback fact. Available columns: {list(df.columns)}",
-            "metric": "unknown",
-            "value": 0,
-            "period": "unknown",
-            "segment": "unknown",
-            "unit": "unknown",
-        }
-
-    def _fallback_medical_insurance(self, user_query: str, df: pd.DataFrame, cols: dict) -> dict[str, Any]:
-        """Fallback for medical insurance datasets with region, sex, charges columns."""
         try:
-            region_col = cols.get("region")
-            charges_col = cols.get("charges")
-            sex_col = cols.get("sex")
+            # Get basic info about the dataset
+            total_rows = len(df)
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
             
-            # Find region with most claims
-            region_counts = df[region_col].value_counts()
-            top_region = region_counts.idxmax()
-            top_region_count = int(region_counts.max())
+            # Try to provide some basic insight
+            summary_parts = [f"Dataset contains {total_rows:,} records"]
             
-            # Within that region, find which gender has more claims
-            region_df = df[df[region_col] == top_region]
-            sex_counts = region_df[sex_col].value_counts()
-            top_sex = sex_counts.idxmax() if len(sex_counts) > 0 else "unknown"
-            top_sex_count = int(sex_counts.max()) if len(sex_counts) > 0 else 0
+            # If there are categorical columns, find the most common category
+            top_category = None
+            if categorical_cols:
+                first_cat_col = categorical_cols[0]
+                value_counts = df[first_cat_col].value_counts()
+                if not value_counts.empty:
+                    top_category = str(value_counts.index[0])
+                    top_count = int(value_counts.iloc[0])
+                    summary_parts.append(f"Most common {first_cat_col}: {top_category} ({top_count} records)")
             
-            # Total charges for top region
-            total_charges = float(region_df[charges_col].sum())
+            # If there are numeric columns, provide a basic stat
+            if numeric_cols:
+                first_num_col = numeric_cols[0]
+                total_sum = float(df[first_num_col].sum())
+                summary_parts.append(f"Total {first_num_col}: {total_sum:,.2f}")
+            
+            summary = ". ".join(summary_parts)
             
             return {
-                "metric": "regional_claims_analysis",
-                "value": top_region_count,
-                "period": "dataset_period",
-                "segment": f"{top_region} region",
-                "unit": "claims",
+                "metric": "dataset_overview",
+                "value": total_rows,
+                "period": "full_dataset",
+                "segment": top_category or "all_records",
+                "unit": "records",
+                "summary": summary,
                 "details": {
-                    "top_region": top_region,
-                    "total_claims_in_region": top_region_count,
-                    "dominant_gender": top_sex,
-                    "gender_claims_count": top_sex_count,
-                    "total_charges": round(total_charges, 2),
-                },
-                "note": "Fallback analysis for medical insurance data"
+                    "numeric_columns": numeric_cols[:5],  # First 5
+                    "categorical_columns": categorical_cols[:5],  # First 5
+                    "note": "Fallback analysis - LLM code generation failed"
+                }
             }
         except Exception as e:
+            # Ultimate fallback if even basic stats fail
             return {
-                "error": f"Medical insurance fallback failed: {e}",
+                "error": f"Could not analyze dataset: {e}",
                 "metric": "unknown",
                 "value": 0,
                 "period": "unknown",
                 "segment": "unknown",
                 "unit": "unknown",
+                "summary": "Unable to process the dataset.",
+                "details": {"available_columns": list(df.columns)[:10]}
             }
-
-    def _fallback_product_claims(self, user_query: str, df: pd.DataFrame, cols: dict) -> dict[str, Any]:
-        """Fallback for product claims datasets (legacy behavior)."""
-        pc = cols["product_category"]
-        dt = cols["date_of_incident"]
-        amt = cols["claim_amount"]
-
-        dff = df.copy()
-        # Ensure datetime
-        try:
-            dff[dt] = pd.to_datetime(dff[dt], errors="coerce")
-        except Exception:
-            pass
-        m = dff[dt].dt.month == 3
-        y = dff[dt].dt.year == 2025
-        cat = dff[pc] == "Electronics"
-        filt = cat & m & y
-        slice_df = dff.loc[filt]
-        count = int(slice_df.shape[0])
-        total = float(slice_df[amt].sum()) if count else 0.0
-
-        top_city_str = ""
-        city_col = cols.get("city")
-        if city_col and count:
-            top = (
-                slice_df.groupby(city_col, dropna=False)[amt]
-                .count()
-                .sort_values(ascending=False)
-                .head(1)
-            )
-            if not top.empty:
-                top_city = top.index[0]
-                top_count = int(top.iloc[0])
-                top_city_str = f"{top_city}:{top_count}"
-
-        return {
-            "metric": "claims_spike",
-            "value": count,
-            "period": "March 2025",
-            "segment": "Electronics",
-            "unit": "claims",
-            "details": {
-                "total_amount_usd": round(total, 2),
-                "top_city": top_city_str,
-            },
-            "note": "Fallback structured fact"
-        }
 
 
 @tool("search_for_probable_causes")
