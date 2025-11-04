@@ -29,6 +29,7 @@ class AgentState(TypedDict, total=False):
     internal_context: Optional[str]
     internal_summary: Optional[str]  # plain English summary from data
     external_context: Optional[str]
+    sources: Optional[List[Dict[str, str]]]  # List of {title, url, snippet}
     final_answer: Optional[str]
     external_relevance: Optional[float]
     needs_external_search: Optional[bool]  # decision flag
@@ -295,6 +296,7 @@ Format: YES|reason or NO|reason
 
         best_text = ""
         best_score = -1.0
+        best_sources = []
         threshold = 0.6
         max_attempts = 3
         
@@ -310,8 +312,19 @@ Format: YES|reason or NO|reason
                 summary = f"Search failed: {e}"
                 logger.warning(f"Search attempt {i+1} failed: {e}")
 
-            # Auto-summarize the external context
+            # Parse JSON response to extract summary and sources
             ext_text = str(summary)
+            sources_list = []
+            try:
+                parsed = json.loads(str(summary))
+                if isinstance(parsed, dict):
+                    ext_text = parsed.get("summary", str(summary))
+                    sources_list = parsed.get("sources", [])
+            except Exception:
+                # If not JSON, use as-is
+                pass
+
+            # Auto-summarize the external context
             if summarize_tool is not None and isinstance(ext_text, str) and ext_text.strip():
                 try:
                     t1 = time.perf_counter()
@@ -329,7 +342,7 @@ Format: YES|reason or NO|reason
             logger.info(f"Search attempt {i+1} relevance score: {score:.2f}")
 
             if score > best_score:
-                best_score, best_text = score, ext_text
+                best_score, best_text, best_sources = score, ext_text, sources_list
             if score >= threshold:
                 logger.info(f"Relevance threshold reached ({score:.2f} >= {threshold})")
                 break
@@ -337,6 +350,7 @@ Format: YES|reason or NO|reason
         return {
             "messages": msgs + [{"type": "ai", "content": f"External context gathered (relevance {best_score:.2f}): {best_text}"}],
             "external_context": best_text,
+            "sources": best_sources,
             "external_relevance": max(0.0, best_score),
             "search_iterations": (current_iteration or 0) + 1,
         }

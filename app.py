@@ -112,6 +112,7 @@ if ask:
                         "internal_fact": result.get("internal_fact") if show_context else None,
                         "internal_context": result.get("internal_context") if show_context else None,
                         "external_context": result.get("external_context") if show_context else None,
+                        "sources": result.get("sources"),  # Always capture sources
                     }
                     if not (
                         len(st.session_state.history) > 0
@@ -142,3 +143,15 @@ with chat_container:
                 st.write(turn.get("external_context"))
             st.markdown("**Answer**")
             st.write(turn.get("final_answer", ""))
+            
+            # Display sources if available
+            sources = turn.get("sources")
+            if sources and isinstance(sources, list) and len(sources) > 0:
+                st.markdown("**Sources**")
+                for idx, source in enumerate(sources, 1):
+                    title = source.get("title", "Untitled")
+                    url = source.get("url", "")
+                    if url:
+                        st.markdown(f"{idx}. [{title}]({url})")
+                    else:
+                        st.markdown(f"{idx}. {title}")

@@ -89,6 +89,7 @@ logs/
 *.gz
 *.bz2
 *.xz
-./data/
+*.csv
+*.json
 
 # End of file

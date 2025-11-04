@@ -97,8 +97,11 @@ FIELD SPECIFICATIONS:
   * If they ask about "gender" or "sex", use the dominant gender
   * If they ask about multiple dimensions, pick the MOST relevant one as segment
 - `unit`: Appropriate unit ("records", "claims", "patients", "USD", "percentage", etc.)
-- `details`: Dict with secondary breakdowns (e.g., {{"by_gender": {{"male": 120, "female": 95}}}})
-- `summary`: 1-2 sentence plain English answer to the question with key numbers
+- `details`: Dict with secondary breakdowns - MUST contain ACTUAL VALUES from the data
+  * For multi-part questions, put the answer to the secondary part here
+  * Example: If asking "which region claimed most AND which gender in that region", `details` should have {{"by_gender": {{"male": <number>, "female": <number>}}}}
+  * NEVER use region names or other dimension values as keys in gender breakdowns
+- `summary`: 1-2 sentence plain English answer to the question with ALL key numbers including secondary dimensions
 
 DATASET CONTEXT (adapt your analysis to these columns):
 - Numeric columns: {numeric_cols}
@@ -127,6 +130,33 @@ result = {{
     "unit": "records",
     "details": {{}},
     "summary": "Plain English answer"
+}}
+print(json.dumps(result))
+
+EXAMPLE FOR MULTI-DIMENSIONAL QUESTIONS:
+# Question: "Which region has the most claims and which gender in that region has more?"
+# Step 1: Find the region with highest claims
+region_totals = df.groupby('region')['claim'].sum()
+top_region = region_totals.idxmax()
+top_region_value = int(region_totals.max())
+
+# Step 2: Within that region, find gender breakdown
+region_data = df[df['region'] == top_region]
+gender_totals = region_data.groupby('gender')['claim'].sum()
+
+# Step 3: Build result with BOTH answers
+result = {{
+    "metric": "regional_claim_analysis",
+    "value": top_region_value,
+    "period": "full_dataset",
+    "segment": top_region,
+    "unit": "USD",
+    "details": {{
+        "by_gender": gender_totals.to_dict(),
+        "top_gender": gender_totals.idxmax(),
+        "top_gender_amount": int(gender_totals.max())
+    }},
+    "summary": f"The {{top_region}} region has the highest claims ({{top_region_value}} USD). Within this region, {{gender_totals.idxmax()}} has claimed more ({{int(gender_totals.max())}} USD vs {{int(gender_totals.min())}} USD)."
 }}
 print(json.dumps(result))
 
@@ -426,12 +456,18 @@ def search_for_probable_causes(payload: Any) -> str:
     except Exception as e:
         # Fallback: return raw sources when Gemini client not available
         lines = ["Top findings:"] + [f"- {s['title']} — {s['snippet']} ({s['url']})" for s in sources]
-        return "\n".join(lines)
+        return json.dumps({
+            "summary": "\n".join(lines),
+            "sources": sources
+        })
 
     if not config.GEMINI_API_KEY:
         # Fallback: return raw sources if key missing
         lines = ["Top findings (GEMINI_API_KEY missing):"] + [f"- {s['title']} — {s['snippet']} ({s['url']})" for s in sources]
-        return "\n".join(lines)
+        return json.dumps({
+            "summary": "\n".join(lines),
+            "sources": sources
+        })
 
     try:
         genai.configure(api_key=config.GEMINI_API_KEY)
@@ -449,14 +485,24 @@ def search_for_probable_causes(payload: Any) -> str:
         result = model.generate_content(prompt)
         text = getattr(result, "text", None) or getattr(result, "candidates", None)
         if isinstance(text, str) and text.strip():
-            return text.strip()
+            # Return JSON with both summary and sources
+            return json.dumps({
+                "summary": text.strip(),
+                "sources": sources
+            })
         # Fallback to raw sources if unexpected response
         lines = ["Top findings:"] + [f"- {s['title']} — {s['snippet']} ({s['url']})" for s in sources]
-        return "\n".join(lines)
+        return json.dumps({
+            "summary": "\n".join(lines),
+            "sources": sources
+        })
     except Exception as e:
         # On error, fall back to listing search results
         lines = [f"Synthesis failed: {e}", "Top findings:"] + [f"- {s['title']} — {s['snippet']} ({s['url']})" for s in sources]
-        return "\n".join(lines)
+        return json.dumps({
+            "summary": "\n".join(lines),
+            "sources": sources
+        })
 
 
 @tool("summarize_text")
