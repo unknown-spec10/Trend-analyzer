@@ -182,6 +182,7 @@ Respond with ONLY the search query, no explanation.
         # Validate question quality
         import re
         question_stripped = question.strip()
+        question_lower = question_stripped.lower()
         
         # Check for invalid/meaningless input
         is_valid = True
@@ -206,36 +207,60 @@ Respond with ONLY the search query, no explanation.
             is_valid = False
             validation_message = "Your input doesn't contain recognizable words. Please ask a clear question."
         else:
-            # Check for keyboard mashing (e.g., "lklk;l", "asdfghjkl")
-            # Detect: high ratio of consonants, repeated patterns, no vowel-consonant alternation
-            words = re.findall(r'\b[a-zA-Z]{3,}\b', question_stripped.lower())
-            if words:
-                # Check if it looks like random typing
-                has_meaningful_word = False
-                common_words = {'what', 'which', 'who', 'where', 'when', 'why', 'how', 'show', 'get', 'find', 
-                               'the', 'is', 'are', 'was', 'were', 'have', 'has', 'had', 'do', 'does', 'did',
-                               'can', 'could', 'would', 'should', 'may', 'might', 'must', 'will', 'shall',
-                               'top', 'bottom', 'highest', 'lowest', 'most', 'least', 'total', 'sum', 'average',
-                               'region', 'city', 'state', 'country', 'year', 'month', 'day', 'data', 'value'}
-                
-                for word in words:
-                    # Check if it's a common word
-                    if word in common_words:
-                        has_meaningful_word = True
-                        break
+            # Check for off-topic/conversational questions (not about data)
+            off_topic_patterns = [
+                # Greetings and pleasantries
+                r'^(hi|hello|hey|greetings|good morning|good afternoon|good evening)',
+                r'^(thank you|thanks|thx)',
+                # Personal questions
+                r'(what is your|what\'s your|tell me your|who are you)',
+                r'(your name|your age|where are you|who made you|who created you)',
+                # General conversation
+                r'^(how are you|how do you do)',
+                r'(tell me about yourself|introduce yourself)',
+                r'(can you help|help me)',
+                # Meta questions about the tool itself
+                r'(what can you do|what are you|what is this)',
+                r'(how does this work|how do i use)',
+            ]
+            
+            for pattern in off_topic_patterns:
+                if re.search(pattern, question_lower):
+                    is_valid = False
+                    validation_message = "Please ask a question about your data, not a conversational question."
+                    break
+            
+            if is_valid:
+                # Check for keyboard mashing (e.g., "lklk;l", "asdfghjkl")
+                # Detect: high ratio of consonants, repeated patterns, no vowel-consonant alternation
+                words = re.findall(r'\b[a-zA-Z]{3,}\b', question_stripped.lower())
+                if words:
+                    # Check if it looks like random typing
+                    has_meaningful_word = False
+                    common_words = {'what', 'which', 'who', 'where', 'when', 'why', 'how', 'show', 'get', 'find', 
+                                   'the', 'is', 'are', 'was', 'were', 'have', 'has', 'had', 'do', 'does', 'did',
+                                   'can', 'could', 'would', 'should', 'may', 'might', 'must', 'will', 'shall',
+                                   'top', 'bottom', 'highest', 'lowest', 'most', 'least', 'total', 'sum', 'average',
+                                   'region', 'city', 'state', 'country', 'year', 'month', 'day', 'data', 'value'}
                     
-                    # Check for reasonable vowel-consonant ratio (20-60% vowels is typical)
-                    vowels = len([c for c in word if c in 'aeiou'])
-                    consonants = len([c for c in word if c.isalpha() and c not in 'aeiou'])
-                    if consonants > 0:
-                        vowel_ratio = vowels / (vowels + consonants)
-                        if 0.2 <= vowel_ratio <= 0.6 and vowels >= 1:
+                    for word in words:
+                        # Check if it's a common word
+                        if word in common_words:
                             has_meaningful_word = True
                             break
-                
-                if not has_meaningful_word and len(words) <= 2:
-                    is_valid = False
-                    validation_message = "Your input appears to be random typing. Please ask a clear question about your data."
+                        
+                        # Check for reasonable vowel-consonant ratio (20-60% vowels is typical)
+                        vowels = len([c for c in word if c in 'aeiou'])
+                        consonants = len([c for c in word if c.isalpha() and c not in 'aeiou'])
+                        if consonants > 0:
+                            vowel_ratio = vowels / (vowels + consonants)
+                            if 0.2 <= vowel_ratio <= 0.6 and vowels >= 1:
+                                has_meaningful_word = True
+                                break
+                    
+                    if not has_meaningful_word and len(words) <= 2:
+                        is_valid = False
+                        validation_message = "Your input appears to be random typing. Please ask a clear question about your data."
         
         # If invalid, return error state
         if not is_valid:
