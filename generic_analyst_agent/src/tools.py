@@ -126,34 +126,51 @@ Data sample (first 10 rows):
         return textwrap.dedent(instructions).strip()
 
     def _run_query(self, user_query: str) -> Any:
+        import logging
+        logger = logging.getLogger(__name__)
+        
         df = self._data_source.get_data()
         prompt = self._build_prompt(user_query, df)
         
         # Try up to 2 times if LLM fails to generate valid code
         max_attempts = 2
+        last_error = None
+        
         for attempt in range(max_attempts):
             try:
+                logger.info(f"DataQueryTool attempt {attempt + 1}/{max_attempts}")
                 resp = self._llm.invoke(prompt)  # type: ignore[attr-defined]
                 code = _extract_code_blocks(getattr(resp, "content", str(resp)))
                 code = self._sanitize_generated_code(code)
+                
+                logger.debug(f"Generated code:\n{code}")
+                
                 result = self._execute_code(code, df)
                 
                 # If result is a valid structured dict, return it
                 if isinstance(result, dict) and "metric" in result:
+                    logger.info("Successfully generated structured result")
                     return result
+                
+                # Log what we got instead
+                logger.warning(f"Invalid result type or missing 'metric': {type(result)}")
+                last_error = f"Result was {type(result).__name__}, not a valid dict with 'metric' key. Got: {str(result)[:200]}"
                 
                 # If we got an error message, try again
                 if isinstance(result, str) and "Error" in result and attempt < max_attempts - 1:
-                    # Add error feedback to prompt for retry
+                    logger.info(f"Retrying due to error: {result[:100]}")
                     prompt += f"\n\nPREVIOUS ATTEMPT FAILED:\n{result}\n\nPlease fix the code and try again."
                     continue
                     
             except Exception as e:
+                logger.warning(f"Exception in attempt {attempt + 1}: {e}")
+                last_error = str(e)
                 if attempt < max_attempts - 1:
                     prompt += f"\n\nPREVIOUS ATTEMPT FAILED:\n{str(e)}\n\nPlease fix the code and try again."
                     continue
         
         # If all attempts fail, use generic fallback
+        logger.warning(f"All code generation attempts failed. Last error: {last_error}. Using fallback.")
         return self._fallback_fact(user_query, df)
 
     def _sanitize_generated_code(self, code: str) -> str:
@@ -188,11 +205,24 @@ Data sample (first 10 rows):
                     code,
                     {
                         "__builtins__": {
+                            # Essential Python functions
                             "len": len,
                             "range": range,
                             "min": min,
                             "max": max,
                             "sum": sum,
+                            "int": int,
+                            "float": float,
+                            "str": str,
+                            "dict": dict,
+                            "list": list,
+                            "tuple": tuple,
+                            "set": set,
+                            "abs": abs,
+                            "round": round,
+                            "sorted": sorted,
+                            "enumerate": enumerate,
+                            "zip": zip,
                             "print": print,  # allow printing to captured stdout
                         }
                     },
