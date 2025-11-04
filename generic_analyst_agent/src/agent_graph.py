@@ -1,7 +1,12 @@
 """Agent orchestration using LangGraph (SRP).
 
-Defines a strict sequence:
-START -> call_data_tool -> call_search_tool -> synthesize_answer -> END
+Intelligent adaptive workflow:
+START -> call_data_tool -> decide_if_search_needed -> [conditional routing]
+  -> If search needed: call_search_tool -> synthesize_answer -> END
+  -> If data sufficient: synthesize_answer -> END
+
+The agent dynamically adapts to ANY dataset and only searches the web when
+the internal data is insufficient to answer the user's question.
 """
 from __future__ import annotations
 
@@ -22,9 +27,12 @@ class AgentState(TypedDict, total=False):
     messages: List[Any]
     internal_fact: Optional[Any]  # structured dict or string
     internal_context: Optional[str]
+    internal_summary: Optional[str]  # plain English summary from data
     external_context: Optional[str]
     final_answer: Optional[str]
     external_relevance: Optional[float]
+    needs_external_search: Optional[bool]  # decision flag
+    search_iterations: Optional[int]  # track search attempts
 
 
 def create_agent_executor(tools: List[Any]):
@@ -65,25 +73,44 @@ def create_agent_executor(tools: List[Any]):
             return {"metric": "unknown", "value": fact, "period": "unknown", "segment": "unknown", "unit": "unknown"}
         return {"metric": "unknown", "value": str(fact), "period": "unknown", "segment": "unknown", "unit": "unknown"}
 
-    def _build_search_payload(struct: Dict[str, Any], attempt: int) -> Dict[str, Any]:
-        """Build a focused Google CSE query with dateRestrict and negative keywords."""
+    def _build_search_payload(struct: Dict[str, Any], attempt: int, summary: str = "") -> Dict[str, Any]:
+        """Build adaptive Google CSE query based on data context."""
         segment = str(struct.get("segment") or "").strip()
-        period = str(struct.get("period") or "recent period").strip()
+        period = str(struct.get("period") or "").strip()
         metric = str(struct.get("metric") or "").strip()
         
-        # Build adaptive search query based on the data domain
-        # Use segment (category/region/demographic) and period as primary terms
-        base_terms = [segment, metric, period, "causes", "analysis", "trends", "factors"]
-        query = " ".join(t for t in base_terms if t)
+        # Use LLM to generate contextual search query
+        query_builder = ChatGroq(model="llama-3.1-8b-instant", temperature=0.3)
+        prompt = f"""Generate a focused web search query to find external factors explaining this data pattern.
+
+DATA PATTERN:
+- Metric: {metric}
+- Value/Segment: {segment}
+- Period: {period}
+- Summary: {summary[:200]}
+
+Generate a search query that:
+1. Focuses on CAUSES, TRENDS, or EXTERNAL FACTORS
+2. Uses specific terms from the data (region, demographic, category)
+3. Avoids generic terms
+4. Is 5-10 words long
+
+Respond with ONLY the search query, no explanation.
+"""
+        try:
+            resp = query_builder.invoke(prompt)
+            query = getattr(resp, "content", str(resp)).strip()
+            # Fallback if LLM fails
+            if not query or len(query) < 10:
+                query = f"{segment} {metric} {period} causes trends analysis"
+        except Exception:
+            query = f"{segment} {metric} {period} causes trends analysis"
 
         windows = ["m6", "y1", "d30"]
         date_restrict = windows[min(attempt, len(windows) - 1)]
 
-        # Only use negative keywords for clearly irrelevant domains
-        # Removed "medical" and "health" to allow medical insurance analysis
-        negative_keywords = [
-            "recipe", "entertainment", "celebrity", "gossip", "fashion"
-        ]
+        # Minimal negative keywords - let search be broad
+        negative_keywords = ["recipe", "entertainment", "celebrity"]
 
         return {
             "query": query,
@@ -177,6 +204,9 @@ def create_agent_executor(tools: List[Any]):
             if details.get("top_city"):
                 parts.append(f"• Top city: {details['top_city']}")
         internal_context = "\n".join(parts) if parts else ""
+        
+        # Extract the plain-English summary from struct if available
+        internal_summary = struct.get("summary", "")
 
         return {
             "messages": msgs + [
@@ -185,27 +215,102 @@ def create_agent_executor(tools: List[Any]):
             ],
             "internal_fact": struct,
             "internal_context": internal_context or None,
+            "internal_summary": internal_summary or None,
+        }
+
+    def decide_if_search_needed(state: AgentState) -> AgentState:
+        """Intelligent decision node: determines if external search is necessary."""
+        question = None
+        for m in state.get("messages", [])[::-1]:
+            if isinstance(m, dict) and m.get("type") == "human":
+                question = m.get("content")
+                break
+            if isinstance(m, HumanMessage):
+                question = m.content
+                break
+        question = question or ""
+        
+        internal_summary = state.get("internal_summary") or ""
+        internal_struct = _coerce_structured_fact(state.get("internal_fact"))
+        
+        # Use LLM to judge if internal data is sufficient
+        judge = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
+        prompt = f"""You are analyzing whether a data-driven answer is sufficient or needs external research.
+
+USER QUESTION:
+{question}
+
+INTERNAL DATA ANSWER:
+{internal_summary}
+
+INTERNAL DATA DETAILS:
+{json.dumps(internal_struct, indent=2)}
+
+DECISION TASK:
+Determine if the internal data provides a COMPLETE answer to the user's question.
+
+Answer "YES" if:
+- The question asks about patterns, counts, distributions, or comparisons IN THE DATA
+- The data directly answers what/who/where/how many/how much
+- The question is purely descriptive or analytical
+
+Answer "NO" if:
+- The question asks WHY something happened (needs causal explanation)
+- The question asks about external factors, industry trends, or real-world events
+- The question asks about causes, reasons, or drivers beyond the data
+- The data shows a pattern but doesn't explain the underlying cause
+
+Respond with ONLY "YES" or "NO" followed by a brief one-line reason.
+Format: YES|reason or NO|reason
+"""
+        try:
+            resp = judge.invoke(prompt)
+            decision_text = getattr(resp, "content", str(resp)).strip().upper()
+            
+            # Parse decision
+            needs_search = True  # default to searching
+            if decision_text.startswith("YES"):
+                needs_search = False
+                logger.info("Decision: Internal data is sufficient. Skipping external search.")
+            else:
+                logger.info("Decision: External search needed to supplement internal data.")
+                
+        except Exception as e:
+            logger.warning(f"Decision node failed: {e}. Defaulting to search.")
+            needs_search = True
+        
+        return {
+            **state,
+            "needs_external_search": needs_search,
+            "search_iterations": 0,
         }
 
     def call_search_tool(state: AgentState) -> AgentState:
+        """Perform adaptive web search with relevance scoring and iteration."""
         fact_any = state.get("internal_fact") or {}
         struct = _coerce_structured_fact(fact_any)
+        internal_summary = state.get("internal_summary") or ""
         msgs = state.get("messages", [])
+        current_iteration = state.get("search_iterations", 0)
 
         best_text = ""
         best_score = -1.0
         threshold = 0.6
-        attempts = 3
-        for i in range(attempts):
-            payload = _build_search_payload(struct, i)
+        max_attempts = 3
+        
+        for i in range(max_attempts):
+            payload = _build_search_payload(struct, i, internal_summary)
+            logger.info(f"Search attempt {i+1}: query='{payload.get('query')}'")
+            
             try:
                 t0 = time.perf_counter()
                 summary = search_tool.invoke(json.dumps(payload))
                 logger.info("search attempt=%d duration_ms=%.1f", i + 1, (time.perf_counter() - t0) * 1000.0)
             except Exception as e:
                 summary = f"Search failed: {e}"
+                logger.warning(f"Search attempt {i+1} failed: {e}")
 
-            # Auto-summarize the external context to reduce token usage and tighten synthesis
+            # Auto-summarize the external context
             ext_text = str(summary)
             if summarize_tool is not None and isinstance(ext_text, str) and ext_text.strip():
                 try:
@@ -217,23 +322,27 @@ def create_agent_executor(tools: List[Any]):
                 except Exception:
                     pass
 
-            # Enforce tight bullet-first format and length budget
+            # Enforce tight bullet-first format
             ext_text = _tight_bulleted_summary(ext_text)
 
             score = _judge_relevance(struct, ext_text)
+            logger.info(f"Search attempt {i+1} relevance score: {score:.2f}")
 
             if score > best_score:
                 best_score, best_text = score, ext_text
             if score >= threshold:
+                logger.info(f"Relevance threshold reached ({score:.2f} >= {threshold})")
                 break
 
         return {
             "messages": msgs + [{"type": "ai", "content": f"External context gathered (relevance {best_score:.2f}): {best_text}"}],
             "external_context": best_text,
             "external_relevance": max(0.0, best_score),
+            "search_iterations": (current_iteration or 0) + 1,
         }
 
     def synthesize_answer(state: AgentState) -> AgentState:
+        """Create final answer, adapting format based on whether external search was used."""
         question = None
         for m in state.get("messages", [])[::-1]:
             if isinstance(m, dict) and m.get("type") == "human":
@@ -242,51 +351,73 @@ def create_agent_executor(tools: List[Any]):
             if isinstance(m, HumanMessage):
                 question = m.content
                 break
-        question = question or "Why did this happen?"
+        question = question or "What does the data show?"
 
         internal_struct = _coerce_structured_fact(state.get("internal_fact"))
+        internal_summary = state.get("internal_summary") or ""
         internal_for_prompt = json.dumps(internal_struct, ensure_ascii=False)
         external = state.get("external_context") or ""
+        used_search = state.get("needs_external_search", False)
 
         system = ROOT_CAUSE_ANALYST_PROMPT
-        user = (
-            f"Question: {question}\n\n"
-            f"Internal Fact (structured JSON): {internal_for_prompt}\n\n"
-            f"External Context (summarized, bulleted):\n{external}\n\n"
-            "Write the final response using this strict format:\n"
-            "- Start with 5-7 concise bullets (<= 18 words each) citing sources inline as (Title - URL).\n"
-            "- Then a short paragraph (<= 4 sentences) synthesizing causal drivers.\n"
-            "- Add a 'Confidence/Relevance' line with a brief rationale tied to the cited sources.\n"
-            "- Add an 'Assumptions/Unknowns' line listing 1-3 key uncertainties.\n"
-        )
+        
+        if not used_search or not external:
+            # Data-only answer: concise, factual, no external citations needed
+            user = (
+                f"Question: {question}\n\n"
+                f"Internal Data Analysis:\n{internal_summary}\n\n"
+                f"Structured Details: {internal_for_prompt}\n\n"
+                "Write a concise, data-driven answer:\n"
+                "- 3-5 bullets highlighting key findings from the data\n"
+                "- 1-2 sentences synthesizing the pattern or insight\n"
+                "- Note that this answer is based entirely on the provided dataset\n"
+            )
+        else:
+            # Combined answer: data + external research
+            user = (
+                f"Question: {question}\n\n"
+                f"Internal Data: {internal_summary}\n"
+                f"Details: {internal_for_prompt}\n\n"
+                f"External Research:\n{external}\n\n"
+                "Write a comprehensive answer blending data and research:\n"
+                "- 5-7 concise bullets citing sources inline as (Title - URL)\n"
+                "- A short synthesis paragraph (3-4 sentences) connecting data to external factors\n"
+                "- 'Confidence' line explaining how well data + research answer the question\n"
+                "- 'Limitations' line noting any data gaps or assumptions\n"
+            )
+        
         t0 = time.perf_counter()
         response = llm.invoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
         logger.info("synthesis duration_ms=%.1f", (time.perf_counter() - t0) * 1000.0)
         final_text = getattr(response, "content", str(response))
 
-        # Optionally summarize the final answer for a crisp executive insight
-        summarized: str | None = None
-        if summarize_tool is not None and isinstance(final_text, str) and final_text.strip():
-            try:
-                summarized = summarize_tool.invoke(final_text)
-            except Exception:
-                summarized = None
-
-        # Prefer summary-only final output; fall back to full answer if summarization unavailable
-        final_output = (
-            summarized.strip() if isinstance(summarized, str) and summarized.strip() else final_text
-        )
         msgs = state.get("messages", [])
-        return {"messages": msgs + [{"type": "ai", "content": final_output}], "final_answer": final_output}
+        return {"messages": msgs + [{"type": "ai", "content": final_text}], "final_answer": final_text}
 
-    # Build the graph
+    # Conditional routing function
+    def route_after_decision(state: AgentState) -> str:
+        """Route to search or directly to synthesis based on decision."""
+        if state.get("needs_external_search", True):
+            return "call_search_tool"
+        return "synthesize_answer"
+
+    # Build the graph with intelligent routing
     graph = StateGraph(AgentState)
     graph.add_node("call_data_tool", call_data_tool)
+    graph.add_node("decide_if_search_needed", decide_if_search_needed)
     graph.add_node("call_search_tool", call_search_tool)
     graph.add_node("synthesize_answer", synthesize_answer)
 
     graph.set_entry_point("call_data_tool")
-    graph.add_edge("call_data_tool", "call_search_tool")
+    graph.add_edge("call_data_tool", "decide_if_search_needed")
+    graph.add_conditional_edges(
+        "decide_if_search_needed",
+        route_after_decision,
+        {
+            "call_search_tool": "call_search_tool",
+            "synthesize_answer": "synthesize_answer",
+        }
+    )
     graph.add_edge("call_search_tool", "synthesize_answer")
     graph.add_edge("synthesize_answer", END)
 
