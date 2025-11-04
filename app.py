@@ -20,7 +20,7 @@ st.set_page_config(page_title="Trend Analyzer", layout="wide")
 
 # Import after set_page_config to avoid conflicts
 from generic_analyst_agent.src import config  # noqa: F401
-from generic_analyst_agent.src.data_source import DataFrameDataSource
+from generic_analyst_agent.src.data_source import DataFrameDataSource, create_optimized_csv_data_source
 from generic_analyst_agent.src.tools import DataQueryTool, search_for_probable_causes, summarize_text
 from generic_analyst_agent.src.agent_graph import create_agent_executor
 
@@ -44,6 +44,8 @@ if "agent" not in st.session_state:
     st.session_state.agent = None
 if "history" not in st.session_state:
     st.session_state.history = []  # type: ignore[assignment]
+if "stats" not in st.session_state:
+    st.session_state.stats = None
 
 # On upload: read bytes once, parse for preview, build agent
 if uploaded is not None:
@@ -51,20 +53,41 @@ if uploaded is not None:
         file_bytes = uploaded.read()
         st.session_state.uploaded_bytes = file_bytes
         st.session_state.uploaded_name = uploaded.name or "data.csv"
-        df = pd.read_csv(io.BytesIO(file_bytes))
-        st.session_state.df = df
         
-        # Build agent with uploaded data
-        ds = DataFrameDataSource(df)
+        # Use optimized CSV processor via factory function
+        with st.spinner("Processing CSV (optimizing data types and creating cache)..."):
+            ds = create_optimized_csv_data_source(file_bytes, force_reload=False)
+            df = ds.get_data()
+            stats = ds.get_statistics()
+            st.session_state.df = df
+            st.session_state.stats = stats
+        
+        # Build agent with optimized data source
         dq = DataQueryTool(ds)
         tools = [dq.query_data, search_for_probable_causes, summarize_text]
         st.session_state.agent = create_agent_executor(tools)
         
-        st.success(f"Loaded CSV with {df.shape[0]:,} rows and {df.shape[1]} columns")
-        with st.expander("Preview (first 10 rows)"):
-            st.dataframe(df.head(10))
+        memory_mb = stats.get('memory_usage_mb', 0) if stats else 0
+        st.success(f"✅ Loaded and optimized CSV: {df.shape[0]:,} rows, {df.shape[1]} columns ({memory_mb:.1f} MB in memory)")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            with st.expander("📊 Data Preview (first 10 rows)"):
+                st.dataframe(df.head(10))
+        with col2:
+            if stats:
+                with st.expander("📈 Quick Statistics"):
+                    st.json({
+                        "Total Rows": f"{stats['row_count']:,}",
+                        "Total Columns": stats['column_count'],
+                        "Memory Usage": f"{memory_mb:.2f} MB",
+                        "Null Values": sum(col_stats['null_count'] for col_stats in stats['columns'].values()),
+                    })
     except Exception as e:
         st.error(f"Failed to load CSV: {e}")
+        import traceback
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
 
 # Chat UI
 st.subheader("Chat")

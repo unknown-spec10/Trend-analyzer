@@ -2,6 +2,7 @@
 
 - Single Responsibility: provide data access through a simple interface.
 - Dependency Inversion: high-level tools depend on BaseDataSource, not concrete pandas CSV reading.
+- Integration: Uses OptimizedCSVProcessor for efficient CSV loading with caching.
 """
 from __future__ import annotations
 
@@ -187,10 +188,64 @@ class DataFrameDataSource(BaseDataSource):
     """In-memory DataFrame data source.
 
     Useful for UIs that upload a CSV and hold it in memory, avoiding file round-trips.
+    Can optionally store pre-computed statistics for faster LLM prompts.
     """
 
-    def __init__(self, df: pd.DataFrame) -> None:
+    def __init__(self, df: pd.DataFrame, stats: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize with DataFrame and optional pre-computed statistics.
+        
+        Args:
+            df: The DataFrame to wrap
+            stats: Optional pre-computed statistics from OptimizedCSVProcessor
+        """
         self._df = df
+        self._stats = stats
 
     def get_data(self) -> pd.DataFrame:
         return self._df
+    
+    def get_statistics(self) -> Optional[Dict[str, Any]]:
+        """Get pre-computed statistics if available."""
+        return self._stats
+
+
+# ==================== Factory Functions ====================
+
+def create_optimized_csv_data_source(
+    file_path_or_bytes: Any,
+    force_reload: bool = False,
+) -> DataFrameDataSource:
+    """Create a DataFrameDataSource using OptimizedCSVProcessor.
+    
+    This is the RECOMMENDED way to load CSV files as it provides:
+    - Type optimization for memory efficiency
+    - Parquet caching for faster repeated loads
+    - Pre-computed statistics for faster LLM prompts
+    
+    Args:
+        file_path_or_bytes: Path to CSV file or file bytes
+        force_reload: Skip cache and reprocess CSV
+        
+    Returns:
+        DataFrameDataSource with optimized DataFrame and statistics
+        
+    Example:
+        >>> ds = create_optimized_csv_data_source("data.csv")
+        >>> df = ds.get_data()
+        >>> stats = ds.get_statistics()
+    """
+    try:
+        from .csv_processor import OptimizedCSVProcessor
+    except ImportError:
+        # Fallback if csv_processor not available
+        import warnings
+        warnings.warn("OptimizedCSVProcessor not available, using standard CSV reading")
+        if isinstance(file_path_or_bytes, (str, Path)):
+            df = pd.read_csv(file_path_or_bytes)
+        else:
+            df = pd.read_csv(file_path_or_bytes)
+        return DataFrameDataSource(df, stats=None)
+    
+    processor = OptimizedCSVProcessor()
+    df, stats = processor.process_csv(file_path_or_bytes, force_reload=force_reload)
+    return DataFrameDataSource(df, stats=stats)

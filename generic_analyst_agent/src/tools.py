@@ -237,53 +237,74 @@ Data sample (first 10 rows):
         return "\n".join(lines).strip()
 
     def _execute_code(self, code: str, df: pd.DataFrame) -> Any:
-        """Execute generated code in a constrained namespace and capture stdout.
+        """Execute generated code in a sandboxed environment with resource limits.
 
-        WARNING: Uses exec for demo simplicity. In production, enforce strict sandboxing.
+        Uses subprocess isolation for production safety.
         Returns a dict when the printed output is JSON or a Python dict; otherwise returns a string message.
         """
-        # minimal globals/locals; allow df and optionally pandas alias
-        local_vars: dict[str, Any] = {"df": df, "pd": pd, "json": json}
-        stdout = io.StringIO()
         try:
-            with redirect_stdout(stdout):
-                exec(
-                    code,
-                    {
-                        "__builtins__": {
-                            # Essential Python functions
-                            "len": len,
-                            "range": range,
-                            "min": min,
-                            "max": max,
-                            "sum": sum,
-                            "int": int,
-                            "float": float,
-                            "str": str,
-                            "dict": dict,
-                            "list": list,
-                            "tuple": tuple,
-                            "set": set,
-                            "abs": abs,
-                            "round": round,
-                            "sorted": sorted,
-                            "enumerate": enumerate,
-                            "zip": zip,
-                            "print": print,  # allow printing to captured stdout
-                        }
-                    },
-                    local_vars,
-                )
-        except Exception as e:
-            return f"Error executing generated code: {e}\nCode:\n{code}"
-
-        printed = stdout.getvalue().strip()
-        # If author forgot to print, try to read `result`
-        if not printed and "result" in local_vars:
+            from .sandbox import get_executor
+            use_sandbox = True
+        except ImportError:
+            use_sandbox = False
+            import logging
+            logging.getLogger(__name__).warning("Sandbox module not available. Using fallback execution.")
+        
+        if use_sandbox:
+            # Use sandboxed subprocess execution (RECOMMENDED)
+            executor = get_executor(timeout_seconds=30, memory_limit_mb=512)
+            result = executor.execute(code, df)
+            
+            if "error" in result:
+                return f"Error executing generated code: {result['error']}\nCode:\n{code}"
+            
+            printed = result.get("output", "").strip()
+        else:
+            # Fallback to in-process execution (LESS SAFE)
+            local_vars: dict[str, Any] = {"df": df, "pd": pd, "json": json}
+            stdout = io.StringIO()
             try:
-                return dict(local_vars["result"])  # type: ignore[arg-type]
-            except Exception:
-                printed = str(local_vars["result"])
+                with redirect_stdout(stdout):
+                    exec(
+                        code,
+                        {
+                            "__builtins__": {
+                                # Essential Python functions
+                                "len": len,
+                                "range": range,
+                                "min": min,
+                                "max": max,
+                                "sum": sum,
+                                "int": int,
+                                "float": float,
+                                "str": str,
+                                "dict": dict,
+                                "list": list,
+                                "tuple": tuple,
+                                "set": set,
+                                "abs": abs,
+                                "round": round,
+                                "sorted": sorted,
+                                "enumerate": enumerate,
+                                "zip": zip,
+                                "print": print,
+                                "bool": bool,
+                                "isinstance": isinstance,
+                                "type": type,
+                            }
+                        },
+                        local_vars,
+                    )
+            except Exception as e:
+                return f"Error executing generated code: {e}\nCode:\n{code}"
+
+            printed = stdout.getvalue().strip()
+            # If author forgot to print, try to read `result`
+            if not printed and "result" in local_vars:
+                try:
+                    return dict(local_vars["result"])  # type: ignore[arg-type]
+                except Exception:
+                    printed = str(local_vars["result"])
 
         if not printed:
             return "No output produced by the generated code."

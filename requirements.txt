@@ -3,6 +3,9 @@ streamlit==1.37.1
 pandas==2.2.3
 requests==2.32.3
 
+# Performance and optimization
+pyarrow>=14.0.0  # Required for Parquet support (faster file I/O)
+
 # LangChain ecosystem
 langchain==0.2.16
 langchain-core==0.2.39
