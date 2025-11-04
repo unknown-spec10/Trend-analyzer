@@ -45,6 +45,7 @@ htmlcov/
 .cache/
 .mypy_cache/
 .pytype/
+tests/
 
 # Jupyter
 .ipynb_checkpoints/

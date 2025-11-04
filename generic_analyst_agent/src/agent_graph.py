@@ -34,6 +34,9 @@ class AgentState(TypedDict, total=False):
     external_relevance: Optional[float]
     needs_external_search: Optional[bool]  # decision flag
     search_iterations: Optional[int]  # track search attempts
+    conversation_history: Optional[List[Dict[str, Any]]]  # Previous Q&A pairs
+    previous_facts: Optional[List[Dict[str, Any]]]  # Previous data findings
+    needs_clarification: Optional[bool]  # Whether question is ambiguous
 
 
 def create_agent_executor(tools: List[Any]):
@@ -157,20 +160,120 @@ Respond with ONLY the search query, no explanation.
             pass
         return 0.0
 
+    def detect_clarification_need(state: AgentState) -> AgentState:
+        """Detect if the question references previous conversation context."""
+        msgs = state.get("messages", [])
+        question: str = ""
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("type") == "human":
+                q = m.get("content")
+                if isinstance(q, str):
+                    question = q
+                break
+            if hasattr(m, "type") and getattr(m, "type") == "human":
+                q = getattr(m, "content", None)
+                if isinstance(q, str):
+                    question = q
+                break
+            if isinstance(m, HumanMessage):
+                question = str(m.content)
+                break
+        
+        conversation_history = state.get("conversation_history", [])
+        
+        # Check if question has context references
+        reference_patterns = [
+            r'\b(that|this|it|those|these)\b',
+            r'\b(what about|how about|and for)\b',
+            r'\b(same|similar|different)\b',
+            r'^(females?|males?|women|men)\??$',  # Single word follow-ups
+            r'^(other|another)\b',
+        ]
+        
+        import re
+        needs_context = False
+        if conversation_history:  # Only check if there's history
+            for pattern in reference_patterns:
+                if re.search(pattern, question.lower()):
+                    needs_context = True
+                    break
+        
+        # If needs context, expand question using previous context
+        expanded_question = question
+        if needs_context and conversation_history:
+            prev_qa = conversation_history[-1]  # Most recent Q&A
+            prev_question = prev_qa.get("question", "")
+            prev_answer = prev_qa.get("answer", "")
+            
+            # Use LLM to expand the question
+            expander = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
+            prompt = f"""Expand this follow-up question using the previous conversation context.
+
+PREVIOUS QUESTION:
+{prev_question}
+
+PREVIOUS ANSWER:
+{prev_answer[:500]}
+
+CURRENT FOLLOW-UP:
+{question}
+
+Task: Rewrite the follow-up as a complete, standalone question that includes the necessary context.
+
+Example 1:
+Previous: "Which region claimed the most?"
+Follow-up: "What about females?"
+Expanded: "What is the total claimed by females in the region that claimed the most?"
+
+Example 2:
+Previous: "What are the top 3 products by sales?"
+Follow-up: "How about last year?"
+Expanded: "What are the top 3 products by sales for last year?"
+
+Respond with ONLY the expanded question, no explanation.
+"""
+            try:
+                resp = expander.invoke(prompt)
+                expanded = getattr(resp, "content", str(resp)).strip()
+                if expanded and len(expanded) > len(question):
+                    expanded_question = expanded
+                    logger.info(f"Expanded question: '{question}' → '{expanded_question}'")
+            except Exception as e:
+                logger.warning(f"Question expansion failed: {e}")
+        
+        return {
+            **state,
+            "needs_clarification": needs_context,
+            "messages": state.get("messages", []) + [
+                {"type": "system", "content": f"Resolved question: {expanded_question}"}
+            ] if needs_context else state.get("messages", []),
+        }
+
     def call_data_tool(state: AgentState) -> AgentState:
         # Expect the last human message to contain the question
         msgs = state.get("messages", [])
         question = None
+        
+        # Check if we have an expanded question from clarification
         for m in reversed(msgs):
-            if isinstance(m, dict) and m.get("type") == "human":
-                question = m.get("content")
-                break
-            if hasattr(m, "type") and getattr(m, "type") == "human":
-                question = getattr(m, "content", None)
-                break
-            if isinstance(m, HumanMessage):
-                question = m.content
-                break
+            if isinstance(m, dict) and m.get("type") == "system" and "Resolved question:" in str(m.get("content", "")):
+                resolved = m.get("content", "").replace("Resolved question:", "").strip()
+                if resolved:
+                    question = resolved
+                    break
+        
+        # Otherwise get the original question
+        if not question:
+            for m in reversed(msgs):
+                if isinstance(m, dict) and m.get("type") == "human":
+                    question = m.get("content")
+                    break
+                if hasattr(m, "type") and getattr(m, "type") == "human":
+                    question = getattr(m, "content", None)
+                    break
+                if isinstance(m, HumanMessage):
+                    question = m.content
+                    break
         question = question or "What is the key internal fact?"
 
         # Invoke the tool with the user's question
@@ -406,7 +509,16 @@ Format: YES|reason or NO|reason
         final_text = getattr(response, "content", str(response))
 
         msgs = state.get("messages", [])
-        return {"messages": msgs + [{"type": "ai", "content": final_text}], "final_answer": final_text}
+        
+        # Update previous_facts list
+        previous_facts = state.get("previous_facts", []) or []
+        previous_facts.append(internal_struct)
+        
+        return {
+            "messages": msgs + [{"type": "ai", "content": final_text}],
+            "final_answer": final_text,
+            "previous_facts": previous_facts,
+        }
 
     # Conditional routing function
     def route_after_decision(state: AgentState) -> str:
@@ -415,14 +527,16 @@ Format: YES|reason or NO|reason
             return "call_search_tool"
         return "synthesize_answer"
 
-    # Build the graph with intelligent routing
+    # Build the graph with intelligent routing and clarification detection
     graph = StateGraph(AgentState)
+    graph.add_node("detect_clarification_need", detect_clarification_need)
     graph.add_node("call_data_tool", call_data_tool)
     graph.add_node("decide_if_search_needed", decide_if_search_needed)
     graph.add_node("call_search_tool", call_search_tool)
     graph.add_node("synthesize_answer", synthesize_answer)
 
-    graph.set_entry_point("call_data_tool")
+    graph.set_entry_point("detect_clarification_need")
+    graph.add_edge("detect_clarification_need", "call_data_tool")
     graph.add_edge("call_data_tool", "decide_if_search_needed")
     graph.add_conditional_edges(
         "decide_if_search_needed",

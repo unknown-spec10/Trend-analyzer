@@ -23,6 +23,7 @@ from generic_analyst_agent.src import config  # noqa: F401
 from generic_analyst_agent.src.data_source import DataFrameDataSource, create_optimized_csv_data_source
 from generic_analyst_agent.src.tools import DataQueryTool, search_for_probable_causes, summarize_text
 from generic_analyst_agent.src.agent_graph import create_agent_executor
+from generic_analyst_agent.src.session_cache import get_cache, generate_dataset_signature
 
 st.title("Trend Analyzer")
 
@@ -32,6 +33,30 @@ with st.sidebar:
     show_context = st.checkbox("Show internal/external context", value=False)
     st.caption("Tip: context shows intermediate facts and web summary.")
     st.markdown("---")
+    
+    # Question suggestions
+    if st.session_state.df is not None:
+        st.header("💡 Suggested Questions")
+        if "suggestions" not in st.session_state:
+            with st.spinner("Generating suggestions..."):
+                from generic_analyst_agent.src.question_suggester import get_question_suggestions
+                try:
+                    st.session_state.suggestions = get_question_suggestions(
+                        st.session_state.df,
+                        st.session_state.stats
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate suggestions: {e}")
+                    st.session_state.suggestions = []
+        
+        # Display suggestions as clickable buttons
+        if "suggestions" in st.session_state and st.session_state.suggestions:
+            for idx, question in enumerate(st.session_state.suggestions):
+                if st.button(question, key=f"suggestion_{idx}", use_container_width=True):
+                    # Set the question in the text input (simulate user input)
+                    st.session_state.suggested_question = question
+                    st.rerun()
+        st.markdown("---")
 
 # Session state
 if "df" not in st.session_state:
@@ -46,6 +71,11 @@ if "history" not in st.session_state:
     st.session_state.history = []  # type: ignore[assignment]
 if "stats" not in st.session_state:
     st.session_state.stats = None
+if "dataset_signature" not in st.session_state:
+    st.session_state.dataset_signature = None
+
+# Initialize cache (1 hour TTL)
+cache = get_cache(ttl_seconds=3600)
 
 # On upload: read bytes once, parse for preview, build agent
 if uploaded is not None:
@@ -61,6 +91,12 @@ if uploaded is not None:
             stats = ds.get_statistics()
             st.session_state.df = df
             st.session_state.stats = stats
+            st.session_state.dataset_signature = generate_dataset_signature(df)
+            
+            # Clear cache when new dataset is loaded
+            cache.clear()
+            if "suggestions" in st.session_state:
+                del st.session_state.suggestions
         
         # Build agent with optimized data source
         dq = DataQueryTool(ds)
@@ -94,8 +130,15 @@ st.subheader("Chat")
 chat_container = st.container()
 
 with st.form("qa_form", clear_on_submit=True):
+    # Pre-fill with suggested question if clicked
+    default_value = ""
+    if "suggested_question" in st.session_state:
+        default_value = st.session_state.suggested_question
+        del st.session_state.suggested_question
+    
     prompt_val = st.text_input(
         "Your question",
+        value=default_value,
         placeholder="Why did claims spike in March 2025?",
         key="prompt_input",
     )
@@ -117,37 +160,61 @@ if ask:
             # Ignore duplicate consecutive question
             pass
         else:
-            # Run agent with progress indicator
-            with st.spinner("Analyzing..."):
-                try:
-                    # Build state with conversation context
-                    messages: List[Any] = []
-                    for h in st.session_state.history:
-                        messages.append({"type": "human", "content": h["question"]})
-                    messages.append({"type": "human", "content": prompt_val})
-                    
-                    state = {"messages": messages}
-                    result = st.session_state.agent.invoke(state)
-                    
-                    record = {
-                        "question": prompt_val,
-                        "final_answer": result.get("final_answer"),
-                        "internal_fact": result.get("internal_fact") if show_context else None,
-                        "internal_context": result.get("internal_context") if show_context else None,
-                        "external_context": result.get("external_context") if show_context else None,
-                        "sources": result.get("sources"),  # Always capture sources
-                    }
-                    if not (
-                        len(st.session_state.history) > 0
-                        and st.session_state.history[-1].get("question") == record["question"]
-                        and st.session_state.history[-1].get("final_answer") == record["final_answer"]
-                    ):
-                        st.session_state.history.append(record)
-                except Exception as e:
-                    st.error(f"Analysis failed: {e}")
-                    import traceback
-                    with st.expander("Error details"):
-                        st.code(traceback.format_exc())
+            # Check cache first
+            dataset_sig = st.session_state.dataset_signature or "unknown"
+            cached_result = cache.get(prompt_val, dataset_sig)
+            
+            if cached_result is not None:
+                # Use cached result
+                st.info("💾 Using cached result")
+                result = cached_result
+            else:
+                # Run agent with progress indicator
+                with st.spinner("Analyzing..."):
+                    try:
+                        # Build state with conversation context
+                        messages: List[Any] = [{"type": "human", "content": prompt_val}]
+                        
+                        # Build conversation history for context
+                        conversation_history = []
+                        for h in st.session_state.history:
+                            conversation_history.append({
+                                "question": h["question"],
+                                "answer": h.get("final_answer", ""),
+                                "fact": h.get("internal_fact"),
+                            })
+                        
+                        state = {
+                            "messages": messages,
+                            "conversation_history": conversation_history,
+                        }
+                        result = st.session_state.agent.invoke(state)
+                        
+                        # Cache the result
+                        cache.set(prompt_val, dataset_sig, result)
+                        
+                    except Exception as e:
+                        st.error(f"Analysis failed: {e}")
+                        import traceback
+                        with st.expander("Error details"):
+                            st.code(traceback.format_exc())
+                        result = None
+            
+            if result is not None:
+                record = {
+                    "question": prompt_val,
+                    "final_answer": result.get("final_answer"),
+                    "internal_fact": result.get("internal_fact") if show_context else None,
+                    "internal_context": result.get("internal_context") if show_context else None,
+                    "external_context": result.get("external_context") if show_context else None,
+                    "sources": result.get("sources"),  # Always capture sources
+                }
+                if not (
+                    len(st.session_state.history) > 0
+                    and st.session_state.history[-1].get("question") == record["question"]
+                    and st.session_state.history[-1].get("final_answer") == record["final_answer"]
+                ):
+                    st.session_state.history.append(record)
 
 # Render history
 with chat_container:
