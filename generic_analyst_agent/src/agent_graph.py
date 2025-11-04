@@ -69,14 +69,20 @@ def create_agent_executor(tools: List[Any]):
         """Build a focused Google CSE query with dateRestrict and negative keywords."""
         segment = str(struct.get("segment") or "").strip()
         period = str(struct.get("period") or "recent period").strip()
-        base_terms = [segment, "claims spike", period, "causes", "industry news", "root cause", "recall", "defect", "outage", "power surge", "supply chain", "weather", "storm", "warranty"]
+        metric = str(struct.get("metric") or "").strip()
+        
+        # Build adaptive search query based on the data domain
+        # Use segment (category/region/demographic) and period as primary terms
+        base_terms = [segment, metric, period, "causes", "analysis", "trends", "factors"]
         query = " ".join(t for t in base_terms if t)
 
         windows = ["m6", "y1", "d30"]
         date_restrict = windows[min(attempt, len(windows) - 1)]
 
+        # Only use negative keywords for clearly irrelevant domains
+        # Removed "medical" and "health" to allow medical insurance analysis
         negative_keywords = [
-            "medical", "health", "dialysis", "inflammation", "cardiovascular", "patient", "clinical",
+            "recipe", "entertainment", "celebrity", "gossip", "fashion"
         ]
 
         return {

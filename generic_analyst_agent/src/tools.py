@@ -78,12 +78,16 @@ You are a helpful data analyst. Given a pandas DataFrame named `df`, write Pytho
 - Computes the answer to the user's question using idiomatic pandas only.
 - Builds a STRUCTURED dictionary named `result` with keys exactly: 
     {{"metric": str, "value": number, "period": str, "segment": str, "unit": str}}
-- The `metric` should be a short name (e.g., "claims_spike").
-- The `value` must be numeric (count or sum) matching the question's intent; prioritize counts for "how many" or totals for "how much".
-- The `period` should be a human-readable time window (e.g., "March 2025" or "Q1 2025").
-- The `segment` should capture the most relevant category or slice (e.g., a product category like "Electronics"). If both product category and city exist, set `segment` to the product category.
-- The `unit` should be appropriate (e.g., "claims", "USD").
-- If helpful, include optional `details` dict with additional fields such as `total_amount_usd` and `top_city`.
+- The `metric` should be a short descriptive name (e.g., "regional_claims", "gender_distribution").
+- The `value` must be numeric (count, sum, or average) matching the question's intent.
+- The `period` should be a human-readable time window if the data has dates; otherwise use "full_dataset" or "all_records".
+- The `segment` should capture the most relevant category, region, demographic, or slice based on the question.
+  Examples:
+  * For regions: "southeast", "northwest", etc.
+  * For demographics: "male", "female", age groups
+  * For categories: product types, claim types, etc.
+- The `unit` should be appropriate (e.g., "claims", "records", "USD", "patients").
+- If helpful, include optional `details` dict with additional breakdowns (e.g., by gender, age, subcategory).
 - Finally, print the JSON-serialized `result` using: print(json.dumps(result)).
 - Do NOT write any import statements; the `json` module is already available.
 - Never read/write files, never access network or environment.
@@ -188,18 +192,72 @@ Data sample (df.head()):
         return printed
 
     def _fallback_fact(self, user_query: str, df: pd.DataFrame) -> dict[str, Any]:
-        """Deterministic fallback when the LLM produces an unhelpful result.
+        """Adaptive fallback when the LLM produces an unhelpful result.
 
-        Heuristic tailored for the sample dataset:
-        - Compute Electronics claims in March 2025 (count and sum)
-        - Report top city by count for that slice
+        Attempts to answer the user's query using heuristics based on available columns.
         """
-        # Try to locate standard column names; if missing, bail out gracefully
+        # Try to locate standard column names
         cols = {c.lower(): c for c in df.columns}
+        
+        # Detect dataset type and adapt accordingly
+        # Medical insurance dataset: age, sex, bmi, region, charges, smoker, children
+        if "region" in cols and "charges" in cols and "sex" in cols:
+            return self._fallback_medical_insurance(user_query, df, cols)
+        
+        # Product/incident claims dataset: product_category, date_of_incident, claim_amount
         required = ["product_category", "date_of_incident", "claim_amount"]
-        if not all(name in cols for name in required):
+        if all(name in cols for name in required):
+            return self._fallback_product_claims(user_query, df, cols)
+        
+        # Generic fallback
+        return {
+            "error": f"Could not compute a fallback fact. Available columns: {list(df.columns)}",
+            "metric": "unknown",
+            "value": 0,
+            "period": "unknown",
+            "segment": "unknown",
+            "unit": "unknown",
+        }
+
+    def _fallback_medical_insurance(self, user_query: str, df: pd.DataFrame, cols: dict) -> dict[str, Any]:
+        """Fallback for medical insurance datasets with region, sex, charges columns."""
+        try:
+            region_col = cols.get("region")
+            charges_col = cols.get("charges")
+            sex_col = cols.get("sex")
+            
+            # Find region with most claims
+            region_counts = df[region_col].value_counts()
+            top_region = region_counts.idxmax()
+            top_region_count = int(region_counts.max())
+            
+            # Within that region, find which gender has more claims
+            region_df = df[df[region_col] == top_region]
+            sex_counts = region_df[sex_col].value_counts()
+            top_sex = sex_counts.idxmax() if len(sex_counts) > 0 else "unknown"
+            top_sex_count = int(sex_counts.max()) if len(sex_counts) > 0 else 0
+            
+            # Total charges for top region
+            total_charges = float(region_df[charges_col].sum())
+            
             return {
-                "error": "Could not compute a fallback fact due to missing expected columns.",
+                "metric": "regional_claims_analysis",
+                "value": top_region_count,
+                "period": "dataset_period",
+                "segment": f"{top_region} region",
+                "unit": "claims",
+                "details": {
+                    "top_region": top_region,
+                    "total_claims_in_region": top_region_count,
+                    "dominant_gender": top_sex,
+                    "gender_claims_count": top_sex_count,
+                    "total_charges": round(total_charges, 2),
+                },
+                "note": "Fallback analysis for medical insurance data"
+            }
+        except Exception as e:
+            return {
+                "error": f"Medical insurance fallback failed: {e}",
                 "metric": "unknown",
                 "value": 0,
                 "period": "unknown",
@@ -207,6 +265,8 @@ Data sample (df.head()):
                 "unit": "unknown",
             }
 
+    def _fallback_product_claims(self, user_query: str, df: pd.DataFrame, cols: dict) -> dict[str, Any]:
+        """Fallback for product claims datasets (legacy behavior)."""
         pc = cols["product_category"]
         dt = cols["date_of_incident"]
         amt = cols["claim_amount"]
