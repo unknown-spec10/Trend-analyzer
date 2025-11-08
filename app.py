@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 from typing import Any, List
+import re
 
 import pandas as pd
 import streamlit as st
@@ -45,6 +46,78 @@ if "dataset_signature" not in st.session_state:
 
 # Initialize cache (1 hour TTL)
 cache = get_cache(ttl_seconds=3600)
+
+
+def extract_concise_pandas_query(code: str) -> str | None:
+    """Extract a concise single-line pandas expression from generated code.
+
+    Heuristics:
+    - Prefer direct expressions that start with df.
+    - If an assignment like `x = df[...]`, return the RHS.
+    - If multiple groupby min/max/mean on the same group/column are present,
+      condense into a single agg([...]).
+    """
+    if not code:
+        return None
+
+    lines = [ln.strip() for ln in code.splitlines()]
+
+    # Collect candidate expressions that involve df
+    exprs: list[str] = []
+    group_ops: list[tuple[str, str, str]] = []  # (groupby, column, agg)
+
+    assign_re = re.compile(r"^[A-Za-z_]\w*\s*=\s*(df\..+)$")
+    expr_re = re.compile(r"^(df\..+)$")
+    # df.groupby('group')['col'].min()/max()/mean()
+    gb_re = re.compile(r"df\.groupby\(([^)]*)\)\s*\[(['\"])?(?P<col>\w+)\2?\]\.(?P<agg>min|max|mean)\(\)")
+
+    for ln in lines:
+        if not ln or ln.startswith('#'):
+            continue
+        m = assign_re.match(ln)
+        if m:
+            exprs.append(m.group(1))
+        else:
+            m2 = expr_re.match(ln)
+            if m2:
+                exprs.append(m2.group(1))
+        m3 = gb_re.search(ln)
+        if m3:
+            groupby_part = ln[ln.find('df.groupby('): ln.find(')')+1]
+            col = m3.group('col')
+            agg = m3.group('agg')
+            group_ops.append((groupby_part, col, agg))
+
+    # Condense groupby ops into a single agg([...]) if possible
+    if group_ops:
+        # Group by (groupby_part, col)
+        grouped: dict[tuple[str, str], set[str]] = {}
+        for g, col, agg in group_ops:
+            grouped.setdefault((g, col), set()).add(agg)
+        # Choose the group with the most aggs, prefer min/max/mean set
+        best_key = None
+        best_aggs: set[str] = set()
+        for key, aggs in grouped.items():
+            if len(aggs) > len(best_aggs):
+                best_key = key
+                best_aggs = aggs
+        if best_key is not None:
+            g, col = best_key
+            ordered = [a for a in ['min', 'max', 'mean'] if a in best_aggs]
+            if ordered:
+                # Build concise expression
+                return f"{g}['{col}'].agg({ordered})"
+
+    # Fallback: choose the longest df expression that looks aggregative
+    if exprs:
+        # Prefer expressions containing groupby/agg/mean/sum/min/max
+        def score(e: str) -> tuple[int, int]:
+            keywords = sum(1 for k in ['groupby', 'agg', 'mean', 'sum', 'min', 'max', 'count'] if k in e)
+            return (keywords, len(e))
+        exprs_sorted = sorted(exprs, key=score, reverse=True)
+        return exprs_sorted[0]
+
+    return None
 
 with st.sidebar:
     st.header("Data source")
@@ -127,6 +200,19 @@ if uploaded is not None:
 # Chat UI
 st.subheader("Chat")
 chat_container = st.container()
+
+# Summary table of past questions & concise pandas queries
+if st.session_state.history:
+    st.markdown("### 🧾 Pandas Query Log")
+    # Build a compact table
+    data = []
+    for i, h in enumerate(st.session_state.history, start=1):
+        if h.get("pandas_query"):
+            data.append({"#": f"Q{i}", "Question": h.get("question", ""), "Pandas Query": h.get("pandas_query")})
+    if data:
+        import pandas as _pd
+        log_df = _pd.DataFrame(data)
+        st.dataframe(log_df, use_container_width=True, hide_index=True)
 
 # Check if there's a pending question from suggestion click
 if "pending_question" in st.session_state:
@@ -214,6 +300,7 @@ if ask:
                     "external_context": result.get("external_context") if show_context else None,
                     "sources": result.get("sources"),  # Always capture sources
                     "generated_code": generated_code,  # Store separately for easy access
+                    "pandas_query": extract_concise_pandas_query(generated_code) if generated_code else None,
                 }
                 if not (
                     len(st.session_state.history) > 0
@@ -234,6 +321,10 @@ with chat_container:
                 if turn.get("internal_context"):
                     st.markdown("**Internal Context**")
                     st.write(turn.get("internal_context"))
+            # Always show concise pandas query if available
+            if turn.get("pandas_query"):
+                st.markdown("**Pandas Query**")
+                st.code(turn.get("pandas_query"), language="python")
             # Show generated pandas code (if available and context is on)
             if show_context and turn.get("generated_code"):
                 with st.expander("🧪 Generated Pandas Code", expanded=False):
