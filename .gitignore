@@ -46,6 +46,7 @@ htmlcov/
 .mypy_cache/
 .pytype/
 tests/
+test_*.py
 
 # Jupyter
 .ipynb_checkpoints/
@@ -81,7 +82,9 @@ logs/
 .streamlit/credentials.toml
 .streamlit/**/secrets.toml
 
-# Data caches/exports (adjust to your needs)
+# Data files and folders
+data/
+*.csv
 *.parquet
 *.feather
 *.arrow
@@ -90,7 +93,6 @@ logs/
 *.gz
 *.bz2
 *.xz
-*.csv
 *.json
 
 # End of file

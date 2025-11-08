@@ -1,5 +1,74 @@
 """Prompts and system persona for the Root Cause Analyst agent (SRP)."""
 
+
+def _generate_adaptive_example(numeric_cols: list, categorical_cols: list, date_cols: list) -> str:
+    """Generate example code based on actual column types available in the dataset."""
+    
+    if not numeric_cols and not categorical_cols:
+        return """EXAMPLE (basic count):
+result = {{
+    "metric": "record_count",
+    "value": len(df),
+    "period": "full_dataset",
+    "segment": "all",
+    "unit": "records",
+    "details": {{}},
+    "summary": f"Dataset contains {{len(df)}} records"
+}}
+print(json.dumps(result))"""
+    
+    # Pick first available numeric and categorical columns for example
+    num_col = numeric_cols[0] if numeric_cols else None
+    cat_col = categorical_cols[0] if categorical_cols else None
+    
+    if num_col and cat_col:
+        return f"""EXAMPLE (using YOUR columns: {num_col}, {cat_col}):
+# For question like "What is average {num_col} for each {cat_col}?"
+by_group = df.groupby('{cat_col}')['{num_col}'].mean()
+overall = df['{num_col}'].mean()
+
+result = {{
+    "metric": "average_{num_col}_by_{cat_col}",
+    "value": float(overall),
+    "period": "full_dataset",
+    "segment": "all_{cat_col}s",
+    "unit": "appropriate_unit",
+    "details": {{
+        "by_{cat_col}": by_group.to_dict()
+    }},
+    "summary": f"Average {num_col} is {{overall:.2f}}. By {cat_col}: " + ", ".join([f"{{k}}: {{v:.2f}}" for k,v in by_group.items()])
+}}
+print(json.dumps(result))"""
+    
+    elif num_col:
+        return f"""EXAMPLE (using YOUR numeric column: {num_col}):
+result_value = df['{num_col}'].mean()
+result = {{
+    "metric": "average_{num_col}",
+    "value": float(result_value),
+    "period": "full_dataset",
+    "segment": "all",
+    "unit": "appropriate_unit",
+    "details": {{}},
+    "summary": f"Average {num_col} is {{result_value:.2f}}"
+}}
+print(json.dumps(result))"""
+    
+    else:  # Only categorical
+        return f"""EXAMPLE (using YOUR categorical column: {cat_col}):
+counts = df['{cat_col}'].value_counts()
+result = {{
+    "metric": "{cat_col}_distribution",
+    "value": int(counts.max()),
+    "period": "full_dataset",
+    "segment": counts.idxmax(),
+    "unit": "records",
+    "details": {{"by_{cat_col}": counts.to_dict()}},
+    "summary": f"Most common {cat_col}: {{counts.idxmax()}} ({{counts.max()}} records)"
+}}
+print(json.dumps(result))"""
+
+
 ROOT_CAUSE_ANALYST_PROMPT = (
     "You are Root Cause Analyst, a disciplined analyst that explains WHY things happen by "
     "following a strict three-step procedure.\n\n"
@@ -22,100 +91,108 @@ ROOT_CAUSE_ANALYST_PROMPT = (
 # Data Analysis Prompt - Used by DataQueryTool in tools.py
 def get_data_analysis_prompt(user_query: str, schema_info: str, head_str: str, 
                               numeric_cols: list, categorical_cols: list, date_cols: list) -> str:
-    """Generate prompt for data analysis code generation."""
-    return f"""You are an expert data analyst. Given a pandas DataFrame named `df`, write Python code that:
+    """Generate ADAPTIVE prompt for data analysis code generation that works with ANY CSV structure."""
+    
+    # Dynamically determine what types of analysis are possible
+    has_numeric = len(numeric_cols) > 0
+    has_categorical = len(categorical_cols) > 0
+    has_dates = len(date_cols) > 0
+    
+    # Build column-specific guidance
+    column_guidance = []
+    if has_numeric:
+        column_guidance.append(f"- You can aggregate numeric columns: {', '.join(numeric_cols[:5])}")
+    if has_categorical:
+        column_guidance.append(f"- You can group by categorical columns: {', '.join(categorical_cols[:5])}")
+    if has_dates:
+        column_guidance.append(f"- You can analyze trends over time using: {', '.join(date_cols[:3])}")
+    
+    # Determine appropriate unit based on data (smart inference)
+    sample_numeric = numeric_cols[0] if has_numeric else None
+    unit_hint = "records"  # Default
+    if sample_numeric:
+        col_lower = sample_numeric.lower()
+        if any(term in col_lower for term in ['price', 'cost', 'revenue', 'amount', 'claim', 'salary', 'payment', 'fee', 'charge']):
+            unit_hint = "currency (USD/EUR/etc.)"
+        elif any(term in col_lower for term in ['temp', 'temperature', 'celsius', 'fahrenheit']):
+            unit_hint = "temperature units"
+        elif any(term in col_lower for term in ['count', 'quantity', 'number', 'total']):
+            unit_hint = "count"
+        elif any(term in col_lower for term in ['percent', 'rate', 'ratio', 'proportion']):
+            unit_hint = "percentage"
+        elif any(term in col_lower for term in ['weight', 'mass', 'kg', 'lb']):
+            unit_hint = "weight units"
+        elif any(term in col_lower for term in ['distance', 'length', 'km', 'mile']):
+            unit_hint = "distance units"
+    
+    # Generate adaptive examples based on actual columns
+    example_code = _generate_adaptive_example(numeric_cols, categorical_cols, date_cols)
+    
+    return f"""You are an expert data analyst. The DataFrame `df` is ALREADY LOADED and ready to use.
 
 CRITICAL REQUIREMENTS:
 1. FIRST check if the question's key terms match the ACTUAL columns in the schema
 2. If the question asks about columns/concepts NOT in the dataset, return an error result
-3. Analyze the ACTUAL columns in the schema to understand the dataset domain
-4. Answer the user's question using ONLY the data present in `df`
+3. Analyze the ACTUAL columns to understand what analysis is possible
+4. Answer using ONLY the data present in `df`
 5. Build a STRUCTURED dictionary named `result` with these exact keys:
    {{"metric": str, "value": number, "period": str, "segment": str, "unit": str, "details": dict, "summary": str}}
 
-ERROR HANDLING FOR MISMATCHED QUESTIONS:
-If the user asks about data that doesn't exist (e.g., "stock price" when there's no stock column), return:
+ERROR HANDLING:
+If the question doesn't match the data, return:
 {{
     "metric": "error",
     "value": None,
     "period": "unknown",
     "segment": "unknown",
     "unit": "unknown",
-    "details": {{}},
-    "summary": "Unable to answer: question asks about data not present in this dataset"
+    "details": {{"error": "Question asks about data not present in this dataset"}},
+    "summary": "Unable to answer: question asks about data not in this dataset"
 }}
 
-FIELD SPECIFICATIONS:
-- `metric`: Short name describing what was measured (e.g., "regional_distribution", "gender_breakdown")
-- `value`: PRIMARY numeric answer (count, sum, average, percentage) - this is the MAIN result
-- `period`: Time window if dates exist; otherwise "full_dataset" or describe the data scope
-- `segment`: The primary grouping/category/demographic that answers the question
-  * Inspect the user's question - if they ask about "region", use the region with highest value
-  * If they ask about "gender" or "sex", use the dominant gender
+DATASET ANALYSIS CAPABILITIES:
+{chr(10).join(column_guidance) if column_guidance else "- This dataset has limited analysis options"}
+
+FIELD SPECIFICATIONS (adapt to YOUR data):
+- `metric`: Short name describing what you measured (use terms from the actual columns)
+- `value`: PRIMARY numeric answer - the MAIN result (use None if not applicable)
+- `period`: If you have date columns: time window; otherwise: "full_dataset"
+- `segment`: The primary grouping from YOUR categorical columns (or "all" if no grouping)
+  * Inspect the user's question - if they ask about a category, use the group with highest value
   * If they ask about multiple dimensions, pick the MOST relevant one as segment
-- `unit`: Appropriate unit ("records", "claims", "patients", "USD", "percentage", etc.)
-- `details`: Dict with secondary breakdowns - MUST contain ACTUAL VALUES from the data
+- `unit`: Appropriate unit from YOUR data context (suggested: {unit_hint})
+- `details`: Dict with secondary breakdowns using YOUR column names
   * For multi-part questions, put the answer to the secondary part here
-  * Example: If asking "which region claimed most AND which gender in that region", `details` should have {{"by_gender": {{"male": <number>, "female": <number>}}}}
-  * NEVER use region names or other dimension values as keys in gender breakdowns
-- `summary`: 1-2 sentence plain English answer to the question with ALL key numbers including secondary dimensions
+  * For "for each X" questions, put per-group breakdown in details as {{"by_X": {{group1: value1, group2: value2}}}}
+  * Example: "average claim for each region" → details should have {{"by_region": {{"northwest": 1234, "southeast": 5678}}}}
+  * NEVER use dimension values as nested keys - keep structure flat
+- `summary`: Plain English answer with actual numbers from YOUR calculation
 
-DATASET CONTEXT (adapt your analysis to these columns):
-- Numeric columns: {numeric_cols}
-- Categorical columns: {categorical_cols}
-- Date columns: {date_cols}
+IMPORTANT - "FOR EACH" QUESTIONS:
+When user asks "for each [category]" or "by [category]", they want per-group results:
+- Put the primary answer (e.g., average across all groups) in `value`
+- Put the per-group breakdown in `details` under key "by_[category]"
+- Include ALL groups in the breakdown, not just top/bottom
+- Example: "average claim for each region" should have details={{"by_region": {{"northwest": 1234, "southeast": 5678, ...}}}}
 
-CODE RULES:
+AVAILABLE COLUMNS IN THIS DATASET:
+- Numeric: {numeric_cols if has_numeric else "None"}
+- Categorical: {categorical_cols if has_categorical else "None"}
+- Dates: {date_cols if has_dates else "None"}
+
 - Build a dict named `result` with ALL required keys (metric, value, period, segment, unit, details, summary)
 - At the end, print ONLY: print(json.dumps(result))
 - Do NOT import anything (json, pd, int, float, str, dict already available)
 - Do NOT use print for anything else (no debug prints)
+- Do NOT define functions - write direct pandas operations
 - Do NOT write comments, explanations, or markdown
 - Use df.columns to verify column names before filtering
 - Handle missing values gracefully with .dropna() or .fillna()
-- Ensure `value` is numeric (use int() or float() to convert)
+- Ensure `value` is numeric (use int() or float() to convert) or None if not applicable
 - Output ONLY executable Python code (no ```python fences, no explanations)
+- Keep code SIMPLE and DIRECT - no complex functions or if-elif chains
 
-EXAMPLE CODE STRUCTURE:
-# Find the answer using pandas
-result_value = ...  # your calculation
-result = {{
-    "metric": "descriptive_name",
-    "value": int(result_value),
-    "period": "full_dataset",
-    "segment": "category_name",
-    "unit": "records",
-    "details": {{}},
-    "summary": "Plain English answer"
-}}
-print(json.dumps(result))
-
-EXAMPLE FOR MULTI-DIMENSIONAL QUESTIONS:
-# Question: "Which region has the most claims and which gender in that region has more?"
-# Step 1: Find the region with highest claims
-region_totals = df.groupby('region')['claim'].sum()
-top_region = region_totals.idxmax()
-top_region_value = int(region_totals.max())
-
-# Step 2: Within that region, find gender breakdown
-region_data = df[df['region'] == top_region]
-gender_totals = region_data.groupby('gender')['claim'].sum()
-
-# Step 3: Build result with BOTH answers
-result = {{
-    "metric": "regional_claim_analysis",
-    "value": top_region_value,
-    "period": "full_dataset",
-    "segment": top_region,
-    "unit": "USD",
-    "details": {{
-        "by_gender": gender_totals.to_dict(),
-        "top_gender": gender_totals.idxmax(),
-        "top_gender_amount": int(gender_totals.max())
-    }},
-    "summary": f"The {{top_region}} region has the highest claims ({{top_region_value}} USD). Within this region, {{gender_totals.idxmax()}} has claimed more ({{int(gender_totals.max())}} USD vs {{int(gender_totals.min())}} USD)."
-}}
-print(json.dumps(result))
+{example_code}
 
 User question:
 {user_query}

@@ -201,7 +201,8 @@ if ask:
                         result = None
             
             if result is not None:
-                # Capture generated pandas code if present inside internal_fact
+                # Capture generated pandas code from internal_fact
+                # The tool returns a dict with generated_code key
                 generated_code = None
                 internal_fact_obj = result.get("internal_fact")
                 if isinstance(internal_fact_obj, dict):
@@ -210,11 +211,11 @@ if ask:
                 record = {
                     "question": prompt_val,
                     "final_answer": result.get("final_answer"),
-                    "internal_fact": result.get("internal_fact") if show_context else None,
+                    "internal_fact": result.get("internal_fact"),  # Always capture for code extraction
                     "internal_context": result.get("internal_context") if show_context else None,
                     "external_context": result.get("external_context") if show_context else None,
                     "sources": result.get("sources"),  # Always capture sources
-                    "generated_code": generated_code,
+                    "generated_code": generated_code,  # Store separately for easy access
                 }
                 if not (
                     len(st.session_state.history) > 0
@@ -235,10 +236,10 @@ with chat_container:
                 if turn.get("internal_context"):
                     st.markdown("**Internal Context**")
                     st.write(turn.get("internal_context"))
-                # Show generated pandas code (if available)
-                if turn.get("generated_code"):
-                    with st.expander("🧪 Generated Pandas Code", expanded=False):
-                        st.code(turn.get("generated_code"), language="python")
+            # Show generated pandas code (if available and context is on)
+            if show_context and turn.get("generated_code"):
+                with st.expander("🧪 Generated Pandas Code", expanded=False):
+                    st.code(turn.get("generated_code"), language="python")
             if show_context and turn.get("external_context"):
                 st.markdown("**External Context**")
                 st.write(turn.get("external_context"))

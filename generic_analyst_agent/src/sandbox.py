@@ -69,6 +69,8 @@ def _execute_in_subprocess(
                             "min": min,
                             "max": max,
                             "sum": sum,
+                            "all": all,
+                            "any": any,
                             "int": int,
                             "float": float,
                             "str": str,

@@ -49,9 +49,11 @@ class DataQueryTool:
     def __init__(self, data_source: BaseDataSource, llm: BaseChatModel | None = None) -> None:
         self._data_source = data_source
         # Instantiate Groq chat model; ignore type checker arg mismatch if stubs differ.
+        # temperature=0.2 balances determinism with functionality
+        # (0.0-0.1 too conservative and causes errors, 0.3+ introduces too much randomness)
         self._llm: BaseChatModel = llm or ChatGroq(
             model="llama-3.1-8b-instant",
-            temperature=0.3
+            temperature=0.2
         )  # type: ignore[arg-type]
 
         # Create a Tool bound to this instance using a closure so we can pass it to the agent
@@ -200,6 +202,8 @@ class DataQueryTool:
                                 "min": min,
                                 "max": max,
                                 "sum": sum,
+                                "all": all,
+                                "any": any,
                                 "int": int,
                                 "float": float,
                                 "str": str,
