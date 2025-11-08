@@ -325,6 +325,9 @@ with chat_container:
             if show_context and turn.get("pandas_query"):
                 st.markdown("**Pandas Query**")
                 st.code(turn.get("pandas_query"), language="python")
+            elif not show_context and turn.get("pandas_query"):
+                # Provide a subtle hint when code exists but context is off
+                st.caption("Tip: Turn on 'Show internal/external context' in the sidebar to view the Pandas Query and full generated code.")
             # Show generated pandas code (if available and context is on)
             if show_context and turn.get("generated_code"):
                 with st.expander("🧪 Generated Pandas Code", expanded=False):
