@@ -77,12 +77,20 @@ class DataQueryTool:
         df.info(buf=buf)
         schema_info = buf.getvalue()
         head_str = df.head(10).to_string(index=False)
-        
+
+        # Try to parse likely date columns to datetime
+        likely_date_cols = [col for col in df.columns if any(term in col.lower() for term in ['date', 'time', 'timestamp'])]
+        for col in likely_date_cols:
+            try:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+            except Exception:
+                pass
+
         # Detect column types to give better guidance
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
         date_cols = df.select_dtypes(include=['datetime']).columns.tolist()
-        
+
         # Use centralized prompt
         return get_data_analysis_prompt(
             user_query=user_query,
@@ -98,6 +106,17 @@ class DataQueryTool:
         logger = logging.getLogger(__name__)
         
         df = self._data_source.get_data()
+
+        # Validation layer: analyze question tokens vs dataset columns
+        validation_error = self._validate_question(user_query, df)
+        if validation_error is not None:
+            logger.info(f"Question validation blocked execution: {validation_error['details']}")
+            validation_error["generated_code"] = None
+            try:
+                validation_error["internal_context"] = self._build_internal_context(df)
+            except Exception:
+                pass
+            return validation_error
         prompt = self._build_prompt(user_query, df)
         
         # Try up to 2 times if LLM fails to generate valid code
@@ -108,11 +127,12 @@ class DataQueryTool:
             try:
                 logger.info(f"DataQueryTool attempt {attempt + 1}/{max_attempts}")
                 resp = self._llm.invoke(prompt)  # type: ignore[attr-defined]
+                logger.info(f"Raw LLM response: {getattr(resp, 'content', str(resp))}")
                 code = _extract_code_blocks(getattr(resp, "content", str(resp)))
                 code = self._sanitize_generated_code(code)
-                
+
                 logger.debug(f"Generated code:\n{code}")
-                
+
                 result = self._execute_code(code, df)
 
                 # If result is a valid structured dict, attach generated code for UI visibility
@@ -121,18 +141,29 @@ class DataQueryTool:
                     # Only attach code if not already present
                     if "generated_code" not in result:
                         result["generated_code"] = code.strip()
+                    # Attach core pandas query lines for UI clarity
+                    try:
+                        result["core_code"] = self._extract_core_pandas(code)
+                    except Exception:
+                        result["core_code"] = None
+                    # Attach internal context summary used to build the prompt
+                    try:
+                        ctx = self._build_internal_context(df)
+                        result["internal_context"] = ctx
+                    except Exception:
+                        pass
                     return result
-                
+
                 # Log what we got instead
                 logger.warning(f"Invalid result type or missing 'metric': {type(result)}")
                 last_error = f"Result was {type(result).__name__}, not a valid dict with 'metric' key. Got: {str(result)[:200]}"
-                
+
                 # If we got an error message, try again
                 if isinstance(result, str) and "Error" in result and attempt < max_attempts - 1:
                     logger.info(f"Retrying due to error: {result[:100]}")
                     prompt += f"\n\nPREVIOUS ATTEMPT FAILED:\n{result}\n\nPlease fix the code and try again."
                     continue
-                    
+
             except Exception as e:
                 logger.warning(f"Exception in attempt {attempt + 1}: {e}")
                 last_error = str(e)
@@ -140,11 +171,205 @@ class DataQueryTool:
                     prompt += f"\n\nPREVIOUS ATTEMPT FAILED:\n{str(e)}\n\nPlease fix the code and try again."
                     continue
         
-        # If all attempts fail, use generic fallback
-        logger.warning(f"All code generation attempts failed. Last error: {last_error}. Using fallback.")
-        fb = self._fallback_fact(user_query, df)
-        fb["generated_code"] = None  # indicate no code produced
-        return fb
+        # If primary model fails, attempt Gemini fallback LLM for code generation
+        try:
+            logger.info("Primary LLM failed; attempting Gemini fallback for code generation.")
+            gemini_resp = self._invoke_gemini(prompt)
+            logger.info(f"Raw Gemini response: {gemini_resp}")
+            gcode = _extract_code_blocks(gemini_resp)
+            gcode = self._sanitize_generated_code(gcode)
+            logger.debug(f"Gemini generated code:\n{gcode}")
+            gresult = self._execute_code(gcode, df)
+            if isinstance(gresult, dict) and "metric" in gresult:
+                if "generated_code" not in gresult:
+                    gresult["generated_code"] = gcode.strip()
+                try:
+                    gresult["core_code"] = self._extract_core_pandas(gcode)
+                except Exception:
+                    gresult["core_code"] = None
+                try:
+                    gresult["internal_context"] = self._build_internal_context(df)
+                except Exception:
+                    pass
+                return gresult
+            last_error = f"Gemini fallback returned invalid result: {type(gresult)} — {str(gresult)[:200]}"
+        except Exception as e:
+            last_error = f"Gemini fallback failed: {e}"
+
+        # Both models failed: return structured error (no rule-based data fallback)
+        logger.warning(f"All code generation attempts failed. Last error: {last_error}.")
+        err = {
+            "metric": "error",
+            "value": None,
+            "period": "unknown",
+            "segment": "unknown",
+            "unit": "unknown",
+            "summary": "Code generation failed after trying primary and fallback LLMs",
+            "details": {"last_error": last_error},
+        }
+        try:
+            err["internal_context"] = self._build_internal_context(df)
+        except Exception:
+            pass
+        err["generated_code"] = None
+        return err
+
+    def _build_internal_context(self, df: pd.DataFrame) -> dict[str, Any]:
+        """Summarize schema and sample for display alongside results."""
+        buf = io.StringIO()
+        df.info(buf=buf)
+        schema_info = buf.getvalue()
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        date_cols = df.select_dtypes(include=['datetime']).columns.tolist()
+        try:
+            head_sample = df.head(3).to_dict(orient="records")
+        except Exception:
+            head_sample = []
+        return {
+            "columns": list(df.columns),
+            "numeric_columns": numeric_cols,
+            "categorical_columns": categorical_cols,
+            "date_columns": date_cols,
+            "schema_info": schema_info,
+            "head_sample": head_sample,
+        }
+
+    def _extract_core_pandas(self, code: str) -> str | None:
+        """Extract the core pandas operations involving df, excluding result packaging/printing.
+
+        Heuristics: keep lines before the first 'result =' that reference df and contain common
+        pandas operations, plus their simple assignments.
+        """
+        ops = ("groupby", "agg", "sum(", "mean(", "count(", "min(", "max(", "query(",
+               "loc[", "iloc[", "sort_values", "pivot_table", "value_counts", "merge(",
+               "assign(", "resample(", "rolling(")
+        lines = code.splitlines()
+        core: list[str] = []
+        for line in lines:
+            if line.strip().startswith("result ") or line.strip().startswith("result="):
+                break
+            if "df" in line and any(op in line for op in ops):
+                core.append(line.rstrip())
+            elif "df" in line and ("=" in line):
+                # keep simple assignments involving df
+                core.append(line.rstrip())
+        # Remove trivial prints or json
+        core = [ln for ln in core if ("print(" not in ln and "json.dumps" not in ln)]
+        return "\n".join(core).strip() or None
+
+
+    def _invoke_gemini(self, prompt: str) -> str:
+        """Invoke Gemini model with the same prompt to get alternate code.
+
+        Returns the raw text content from Gemini. Raises on import/key issues to propagate error context.
+        """
+        import google.generativeai as genai  # type: ignore
+        if not config.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY not configured")
+        genai.configure(api_key=config.GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        resp = model.generate_content(prompt)
+        text = getattr(resp, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text
+        # Some SDKs return candidates list
+        cand = getattr(resp, "candidates", None)
+        if isinstance(cand, list) and cand:
+            # Try to extract first text segment
+            first = cand[0]
+            part_text = getattr(first, "content", None)
+            if isinstance(part_text, str) and part_text.strip():
+                return part_text
+        raise RuntimeError("Gemini response did not contain text content")
+
+    def _validate_question(self, user_query: str, df: pd.DataFrame) -> dict[str, Any] | None:
+        """Validate the question against available dataset columns.
+
+        Logic:
+        1. Tokenize question (simple split on non-alphanumerics) to extract potential column references.
+        2. Score matches: exact column name, underscore/space-insensitive match, singular/plural match.
+        3. If the question references domain-specific column keywords that do NOT exist, and no valid matches are found,
+           return structured error.
+        4. If no column-like tokens found at all (purely generic question) allow LLM (it may do overall stats).
+        5. Temporal tokens (month/quarter/year) require at least one date/time column; else error.
+        """
+        import re
+        q = user_query.lower()
+        col_map = {c.lower(): c for c in df.columns}
+        cols_lower = set(col_map.keys())
+
+        # Basic tokenization
+        tokens = [t for t in re.split(r"[^a-zA-Z0-9_]+", q) if t]
+        if not tokens:
+            return None  # nothing to validate
+
+        # Identify temporal tokens
+        temporal_tokens = (
+            {"q1","q2","q3","q4","quarter","quarters","month","months","year","years"}
+            | {"january","february","march","april","may","june","july","august","september","october","november","december",
+               "jan","feb","mar","apr","jun","jul","aug","sep","sept","oct","nov","dec"}
+        )
+        has_temporal = any(t in temporal_tokens for t in tokens)
+        has_date_col = any(str(dtype).startswith("datetime") for dtype in df.dtypes) or any(
+            any(k in c.lower() for k in ["date","time","timestamp","datetime","dt"]) for c in df.columns)
+        if has_temporal and not has_date_col:
+            return {
+                "metric": "error",
+                "value": None,
+                "period": "unknown",
+                "segment": "unknown",
+                "unit": "unknown",
+                "summary": "Temporal analysis requested but dataset has no date/time columns",
+                "details": {"error": "Missing date/time columns", "question": user_query}
+            }
+
+        # Domain keywords which should map to columns
+        domain_keywords = {
+            "region","claim","salary","department","product","revenue","quantity","price","temperature","humidity",
+            "age","gender","smoker","diabetic","bmi","bloodpressure"
+        }
+        mentioned_domain = {t for t in tokens if t in domain_keywords}
+        matched_columns: set[str] = set()
+        missing_domain: set[str] = set()
+
+        # Matching logic
+        for t in mentioned_domain:
+            if t in cols_lower:
+                matched_columns.add(col_map[t])
+            else:
+                # try singular/plural heuristics
+                singular = t[:-1] if t.endswith("s") else t
+                plural = t + "s" if not t.endswith("s") else t[:-1]
+                if singular in cols_lower:
+                    matched_columns.add(col_map[singular])
+                elif plural in cols_lower:
+                    matched_columns.add(col_map[plural])
+                else:
+                    # try substring match (e.g., "temperature" matches "temperature_celsius")
+                    substring_match = any(t in col or col.startswith(t) for col in cols_lower)
+                    if substring_match:
+                        # Find the matching column
+                        for col_lower, col_orig in col_map.items():
+                            if t in col_lower or col_lower.startswith(t):
+                                matched_columns.add(col_orig)
+                                break
+                    else:
+                        missing_domain.add(t)
+
+        # If domain terms mentioned but none matched
+        if mentioned_domain and not matched_columns and missing_domain == mentioned_domain:
+            return {
+                "metric": "error",
+                "value": None,
+                "period": "unknown",
+                "segment": "unknown",
+                "unit": "unknown",
+                "summary": "Question references columns not present in dataset",
+                "details": {"missing_columns": sorted(missing_domain), "question": user_query}
+            }
+
+        return None
 
     def _sanitize_generated_code(self, code: str) -> str:
         """Remove unsafe or disallowed constructs from model-generated code.
@@ -254,64 +479,6 @@ class DataQueryTool:
             pass
 
         return printed
-
-    def _fallback_fact(self, user_query: str, df: pd.DataFrame) -> dict[str, Any]:
-        """Generic fallback when LLM code generation fails.
-        
-        Provides basic dataset statistics without making assumptions about domain.
-        """
-        try:
-            # Get basic info about the dataset
-            total_rows = len(df)
-            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-            categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-            
-            # Try to provide some basic insight
-            summary_parts = [f"Dataset contains {total_rows:,} records"]
-            
-            # If there are categorical columns, find the most common category
-            top_category = None
-            if categorical_cols:
-                first_cat_col = categorical_cols[0]
-                value_counts = df[first_cat_col].value_counts()
-                if not value_counts.empty:
-                    top_category = str(value_counts.index[0])
-                    top_count = int(value_counts.iloc[0])
-                    summary_parts.append(f"Most common {first_cat_col}: {top_category} ({top_count} records)")
-            
-            # If there are numeric columns, provide a basic stat
-            if numeric_cols:
-                first_num_col = numeric_cols[0]
-                total_sum = float(df[first_num_col].sum())
-                summary_parts.append(f"Total {first_num_col}: {total_sum:,.2f}")
-            
-            summary = ". ".join(summary_parts)
-            
-            return {
-                "metric": "dataset_overview",
-                "value": total_rows,
-                "period": "full_dataset",
-                "segment": top_category or "all_records",
-                "unit": "records",
-                "summary": summary,
-                "details": {
-                    "numeric_columns": numeric_cols[:5],  # First 5
-                    "categorical_columns": categorical_cols[:5],  # First 5
-                    "note": "Fallback analysis - LLM code generation failed"
-                }
-            }
-        except Exception as e:
-            # Ultimate fallback if even basic stats fail
-            return {
-                "error": f"Could not analyze dataset: {e}",
-                "metric": "unknown",
-                "value": 0,
-                "period": "unknown",
-                "segment": "unknown",
-                "unit": "unknown",
-                "summary": "Unable to process the dataset.",
-                "details": {"available_columns": list(df.columns)[:10]}
-            }
 
 
 @tool("search_for_probable_causes")

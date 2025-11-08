@@ -218,19 +218,13 @@ if show_context and st.session_state.history:
 if "pending_question" in st.session_state:
     prompt_val = st.session_state.pending_question
     del st.session_state.pending_question
-    ask = True
 else:
-    with st.form("qa_form", clear_on_submit=True):
-        prompt_val = st.text_input(
-            "Your question",
-            placeholder="Why did claims spike in March 2025?",
-            key="prompt_input",
-        )
-        ask = st.form_submit_button("Ask")
+    # Use chat_input for better chat experience
+    prompt_val = st.chat_input("Ask a question about your data...", key="chat_input")
 
-# When Ask is clicked (or suggestion clicked), run agent locally
-if ask:
-    prompt_val = (prompt_val or "").strip()
+# When a question is submitted (or suggestion clicked)
+if prompt_val:
+    prompt_val = prompt_val.strip()
     if not prompt_val:
         st.warning("Please enter a question.")
     elif st.session_state.agent is None:
@@ -315,22 +309,22 @@ with chat_container:
         with st.chat_message("user"):
             st.write(turn.get("question", ""))
         with st.chat_message("assistant"):
-            if show_context and turn.get("internal_fact") is not None:
-                st.markdown("**Internal Fact**")
-                st.json(turn.get("internal_fact"))
-                if turn.get("internal_context"):
-                    st.markdown("**Internal Context**")
-                    st.write(turn.get("internal_context"))
+            # Show relevant internal context (columns, types, sample) if available
+            if show_context and turn.get("internal_context"):
+                st.markdown("**📊 Dataset Context**")
+                st.write(turn.get("internal_context"))
+            
             # Show concise pandas query if available and context is enabled
             if show_context and turn.get("pandas_query"):
-                st.markdown("**Pandas Query**")
+                st.markdown("**🐼 Pandas Query**")
                 st.code(turn.get("pandas_query"), language="python")
             elif not show_context and turn.get("pandas_query"):
                 # Provide a subtle hint when code exists but context is off
-                st.caption("Tip: Turn on 'Show internal/external context' in the sidebar to view the Pandas Query and full generated code.")
-            # Show generated pandas code (if available and context is on)
+                st.caption("💡 Tip: Turn on 'Show internal/external context' in the sidebar to view the Pandas Query.")
+            
+            # Show full generated pandas code in expander (if available and context is on)
             if show_context and turn.get("generated_code"):
-                with st.expander("🧪 Generated Pandas Code", expanded=False):
+                with st.expander("🧪 View Full Generated Code", expanded=False):
                     st.code(turn.get("generated_code"), language="python")
             if show_context and turn.get("external_context"):
                 st.markdown("**External Context**")

@@ -5,6 +5,8 @@ suggest 5-7 high-value questions that users can ask.
 """
 from __future__ import annotations
 
+import io
+import json
 import logging
 from typing import Dict, Any, List
 
@@ -201,36 +203,75 @@ class QuestionSuggester:
             return self._fallback_questions(None)[:max_questions]
     
     def _fallback_questions(self, df: pd.DataFrame | None) -> List[str]:
-        """Fallback generic questions if LLM fails."""
-        if df is None:
+        """Gemini-based fallback when primary LLM fails to generate questions."""
+        try:
+            import google.generativeai as genai  # type: ignore
+            from . import config
+            
+            if not config.GEMINI_API_KEY:
+                raise RuntimeError("GEMINI_API_KEY not configured")
+            
+            genai.configure(api_key=config.GEMINI_API_KEY)
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            
+            # Build context about the dataset
+            if df is not None:
+                buf = io.StringIO()
+                df.info(buf=buf)
+                schema_info = buf.getvalue()
+                head_str = df.head(5).to_string(index=False)
+                
+                prompt = f"""Generate 5 insightful analytical questions for this dataset.
+
+Dataset Schema:
+{schema_info}
+
+Sample Data (first 5 rows):
+{head_str}
+
+Requirements:
+- Questions should be specific to the actual columns in this dataset
+- Focus on meaningful business/analytical insights
+- Mix different analysis types (aggregation, comparison, trends if dates available)
+- Return ONLY a JSON array of question strings, no other text
+
+Example format: ["Question 1?", "Question 2?", "Question 3?", "Question 4?", "Question 5?"]"""
+            else:
+                prompt = """Generate 5 generic analytical questions suitable for any tabular dataset.
+                
+Requirements:
+- Questions should be broadly applicable
+- Focus on common analysis patterns
+- Return ONLY a JSON array of question strings, no other text
+
+Example format: ["Question 1?", "Question 2?", "Question 3?", "Question 4?", "Question 5?"]"""
+            
+            resp = model.generate_content(prompt)
+            text = getattr(resp, "text", None)
+            if isinstance(text, str) and text.strip():
+                # Try to parse as JSON
+                try:
+                    questions = json.loads(text.strip())
+                    if isinstance(questions, list) and all(isinstance(q, str) for q in questions):
+                        return questions[:5]
+                except Exception:
+                    pass
+            
+            # If Gemini fails, return minimal safe fallback
             return [
                 "What are the summary statistics of the dataset?",
                 "Which categories have the highest counts?",
-                "Are there any missing values in the data?",
                 "What is the distribution of numeric values?",
-                "Show me the top 5 records by value",
             ]
-        
-        questions = []
-        
-        # Generic questions based on column types
-        numeric_cols = df.select_dtypes(include=['number']).columns
-        if len(numeric_cols) > 0:
-            questions.append(f"What is the total {numeric_cols[0]}?")
-            questions.append(f"What is the average {numeric_cols[0]}?")
-        
-        categorical_cols = df.select_dtypes(include=['object', 'category']).columns
-        if len(categorical_cols) > 0 and len(numeric_cols) > 0:
-            questions.append(f"Which {categorical_cols[0]} has the highest {numeric_cols[0]}?")
-        
-        date_cols = df.select_dtypes(include=['datetime64']).columns
-        if len(date_cols) > 0 and len(numeric_cols) > 0:
-            questions.append(f"What is the trend of {numeric_cols[0]} over time?")
-        
-        questions.append("Are there any outliers in the numeric data?")
-        questions.append("What is the distribution of values across categories?")
-        
-        return questions
+            
+        except Exception as e:
+            logger.error(f"Gemini fallback failed: {e}")
+            # Ultimate fallback
+            return [
+                "What are the summary statistics of the dataset?",
+                "Which categories have the highest counts?",
+                "What is the distribution of numeric values?",
+            ]
 
 
 def get_question_suggestions(df: pd.DataFrame, stats: Dict[str, Any] | None = None) -> List[str]:

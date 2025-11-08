@@ -168,6 +168,24 @@ FIELD SPECIFICATIONS (adapt to YOUR data):
   * NEVER use dimension values as nested keys - keep structure flat
 - `summary`: Plain English answer with actual numbers from YOUR calculation
 
+⚠️ CRITICAL - MULTI-METRIC QUESTIONS (READ CAREFULLY):
+When user asks for MULTIPLE metrics in ONE question (e.g., "min, max, and average" OR "minimum, maximum, and mean"):
+YOU MUST CALCULATE **ALL** REQUESTED METRICS - DO NOT CALCULATE ONLY ONE!
+
+Steps:
+1. Parse the question to identify ALL metrics requested (min, max, mean, sum, count, median, std, etc.)
+2. Use .agg([list_of_all_metrics]) to calculate them ALL at once
+3. Store ALL results in the response details
+
+Pattern: "What are [metric1], [metric2], and [metric3] of [column] by [groupby_column]?"
+✅ CORRECT approach:
+- If grouping: stats = df.groupby('groupby_col')['numeric_col'].agg(['metric1', 'metric2', 'metric3'])
+- If overall: Store each metric separately in details
+- Put ALL requested metrics in details with clear keys like "by_category_min", "by_category_max", "by_category_mean"
+- Include overall statistics too: "overall_min", "overall_max", "overall_mean"
+
+❌ WRONG - Do NOT calculate only one metric when multiple are requested!
+
 IMPORTANT - "FOR EACH" QUESTIONS:
 When user asks "for each [category]" or "by [category]", they want per-group results:
 - Put the primary answer (e.g., average across all groups) in `value`
