@@ -52,6 +52,29 @@ with st.sidebar:
     show_context = st.checkbox("Show internal/external context", value=False)
     st.caption("Tip: context shows intermediate facts and web summary.")
     st.markdown("---")
+    
+    # Question suggestions (show in sidebar after file is loaded)
+    if st.session_state.df is not None:
+        st.header("💡 Suggested Questions")
+        if "suggestions" not in st.session_state:
+            with st.spinner("Generating suggestions..."):
+                from generic_analyst_agent.src.question_suggester import get_question_suggestions
+                try:
+                    st.session_state.suggestions = get_question_suggestions(
+                        st.session_state.df,
+                        st.session_state.stats
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate suggestions: {e}")
+                    st.session_state.suggestions = []
+        
+        # Display suggestions as clickable buttons
+        if "suggestions" in st.session_state and st.session_state.suggestions:
+            for idx, question in enumerate(st.session_state.suggestions):
+                if st.button(question, key=f"suggestion_{idx}", use_container_width=True):
+                    # Set the question and trigger ask
+                    st.session_state.pending_question = question
+                    st.rerun()
 
 # On upload: read bytes once, parse for preview, build agent
 if uploaded is not None:
@@ -101,50 +124,25 @@ if uploaded is not None:
         with st.expander("Error details"):
             st.code(traceback.format_exc())
 
-# Question suggestions (show after file is loaded)
-if st.session_state.df is not None:
-    st.markdown("---")
-    st.header("💡 Suggested Questions")
-    if "suggestions" not in st.session_state:
-        with st.spinner("Generating suggestions..."):
-            from generic_analyst_agent.src.question_suggester import get_question_suggestions
-            try:
-                st.session_state.suggestions = get_question_suggestions(
-                    st.session_state.df,
-                    st.session_state.stats
-                )
-            except Exception as e:
-                st.error(f"Failed to generate suggestions: {e}")
-                st.session_state.suggestions = []
-    
-    # Display suggestions as clickable buttons
-    if "suggestions" in st.session_state and st.session_state.suggestions:
-        for idx, question in enumerate(st.session_state.suggestions):
-            if st.button(question, key=f"suggestion_{idx}", use_container_width=True):
-                # Set the question in the text input (simulate user input)
-                st.session_state.suggested_question = question
-                st.rerun()
-
 # Chat UI
 st.subheader("Chat")
 chat_container = st.container()
 
-with st.form("qa_form", clear_on_submit=True):
-    # Pre-fill with suggested question if clicked
-    default_value = ""
-    if "suggested_question" in st.session_state:
-        default_value = st.session_state.suggested_question
-        del st.session_state.suggested_question
-    
-    prompt_val = st.text_input(
-        "Your question",
-        value=default_value,
-        placeholder="Why did claims spike in March 2025?",
-        key="prompt_input",
-    )
-    ask = st.form_submit_button("Ask")
+# Check if there's a pending question from suggestion click
+if "pending_question" in st.session_state:
+    prompt_val = st.session_state.pending_question
+    del st.session_state.pending_question
+    ask = True
+else:
+    with st.form("qa_form", clear_on_submit=True):
+        prompt_val = st.text_input(
+            "Your question",
+            placeholder="Why did claims spike in March 2025?",
+            key="prompt_input",
+        )
+        ask = st.form_submit_button("Ask")
 
-# When Ask is clicked, run agent locally
+# When Ask is clicked (or suggestion clicked), run agent locally
 if ask:
     prompt_val = (prompt_val or "").strip()
     if not prompt_val:
