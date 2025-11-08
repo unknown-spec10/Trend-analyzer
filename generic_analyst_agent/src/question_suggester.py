@@ -11,6 +11,8 @@ from typing import Dict, Any, List
 import pandas as pd
 from langchain_groq import ChatGroq
 
+from .prompts import get_question_suggestions_prompt
+
 logger = logging.getLogger(__name__)
 
 
@@ -168,25 +170,10 @@ class QuestionSuggester:
         context = "\n".join(context_parts)
         
         # Generate questions
-        prompt = f"""You are an expert data analyst. Generate {max_questions} insightful questions that a user could ask about this dataset.
-
-DATASET CHARACTERISTICS:
-{context}
-
-REQUIREMENTS:
-1. Questions should be specific and actionable (not generic like "Show me the data")
-2. Mix different question types:
-   - Aggregation (total, average, sum, count)
-   - Comparison (which X has the highest Y?)
-   - Segmentation (breakdown by category)
-   - Trend analysis (if date columns exist)
-   - Outlier detection (if numeric columns exist)
-3. Use actual column names from the dataset
-4. Questions should be 8-15 words long
-5. Avoid yes/no questions
-
-Return ONLY the questions, one per line, numbered 1-{max_questions}.
-"""
+        prompt = get_question_suggestions_prompt(
+            context=context,
+            max_questions=max_questions
+        )
         
         try:
             response = self.llm.invoke(prompt)

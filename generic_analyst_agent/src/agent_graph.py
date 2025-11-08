@@ -19,7 +19,14 @@ from langgraph.graph import END, StateGraph
 from langchain_core.messages import HumanMessage
 from langchain_groq import ChatGroq
 
-from .prompts import ROOT_CAUSE_ANALYST_PROMPT
+from .prompts import (
+    ROOT_CAUSE_ANALYST_PROMPT,
+    get_search_query_prompt,
+    get_context_summary_prompt,
+    get_relevance_score_prompt,
+    get_question_expansion_prompt,
+    get_search_decision_prompt
+)
 from . import config
 
 
@@ -85,22 +92,12 @@ def create_agent_executor(tools: List[Any]):
         
         # Use LLM to generate contextual search query
         query_builder = ChatGroq(model="llama-3.1-8b-instant", temperature=0.3)
-        prompt = f"""Generate a focused web search query to find external factors explaining this data pattern.
-
-DATA PATTERN:
-- Metric: {metric}
-- Value/Segment: {segment}
-- Period: {period}
-- Summary: {summary[:200]}
-
-Generate a search query that:
-1. Focuses on CAUSES, TRENDS, or EXTERNAL FACTORS
-2. Uses specific terms from the data (region, demographic, category)
-3. Avoids generic terms
-4. Is 5-10 words long
-
-Respond with ONLY the search query, no explanation.
-"""
+        prompt = get_search_query_prompt(
+            metric=metric,
+            segment=segment,
+            period=period,
+            summary=summary[:200]
+        )
         try:
             resp = query_builder.invoke(prompt)
             query = getattr(resp, "content", str(resp)).strip()
@@ -125,15 +122,7 @@ Respond with ONLY the search query, no explanation.
     def _tight_bulleted_summary(text: str) -> str:
         """Create a bullet-first, length-constrained summary of external context."""
         summer = ChatGroq(model="llama-3.1-8b-instant", temperature=0.2)
-        prompt = (
-            "Summarize the CONTEXT into tight bullets first, then one short wrap-up line.\n"
-            "Rules:\n"
-            "- 5-7 bullets, each <= 18 words.\n"
-            "- Max 1200 characters total.\n"
-            "- Preserve any inline citations like (Title - URL) if present.\n"
-            "- Focus on causal drivers and evidence.\n\n"
-            f"CONTEXT:\n{text}"
-        )
+        prompt = get_context_summary_prompt(text=text)
         try:
             resp = summer.invoke(prompt)
             return getattr(resp, "content", str(resp)).strip()
@@ -144,10 +133,9 @@ Respond with ONLY the search query, no explanation.
         """LLM-based relevance score between 0.0 and 1.0."""
         judge = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
         brief = json.dumps({k: internal_struct.get(k) for k in ("metric", "value", "period", "segment", "unit")})
-        prompt = (
-            "Score how relevant the CONTEXT is to the INTERNAL FACT on a 0.0-1.0 scale.\n"
-            "Return ONLY a number with up to 2 decimals, no text.\n\n"
-            f"INTERNAL FACT: {brief}\n\nCONTEXT:\n{context}\n\nScore:"
+        prompt = get_relevance_score_prompt(
+            internal_fact_brief=brief,
+            context=context
         )
         try:
             resp = judge.invoke(prompt)
@@ -302,31 +290,11 @@ Respond with ONLY the search query, no explanation.
             
             # Use LLM to expand the question
             expander = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
-            prompt = f"""Expand this follow-up question using the previous conversation context.
-
-PREVIOUS QUESTION:
-{prev_question}
-
-PREVIOUS ANSWER:
-{prev_answer[:500]}
-
-CURRENT FOLLOW-UP:
-{question}
-
-Task: Rewrite the follow-up as a complete, standalone question that includes the necessary context.
-
-Example 1:
-Previous: "Which region claimed the most?"
-Follow-up: "What about females?"
-Expanded: "What is the total claimed by females in the region that claimed the most?"
-
-Example 2:
-Previous: "What are the top 3 products by sales?"
-Follow-up: "How about last year?"
-Expanded: "What are the top 3 products by sales for last year?"
-
-Respond with ONLY the expanded question, no explanation.
-"""
+            prompt = get_question_expansion_prompt(
+                prev_question=prev_question,
+                prev_answer=prev_answer[:500],
+                current_question=question
+            )
             try:
                 resp = expander.invoke(prompt)
                 expanded = getattr(resp, "content", str(resp)).strip()
@@ -499,41 +467,18 @@ Respond with ONLY the expanded question, no explanation.
             if isinstance(m, HumanMessage):
                 question = m.content
                 break
-        question = question or ""
+        question = str(question or "")
         
         internal_summary = state.get("internal_summary") or ""
         internal_struct = _coerce_structured_fact(state.get("internal_fact"))
         
         # Use LLM to judge if internal data is sufficient
         judge = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
-        prompt = f"""You are analyzing whether a data-driven answer is sufficient or needs external research.
-
-USER QUESTION:
-{question}
-
-INTERNAL DATA ANSWER:
-{internal_summary}
-
-INTERNAL DATA DETAILS:
-{json.dumps(internal_struct, indent=2)}
-
-DECISION TASK:
-Determine if the internal data provides a COMPLETE answer to the user's question.
-
-Answer "YES" if:
-- The question asks about patterns, counts, distributions, or comparisons IN THE DATA
-- The data directly answers what/who/where/how many/how much
-- The question is purely descriptive or analytical
-
-Answer "NO" if:
-- The question asks WHY something happened (needs causal explanation)
-- The question asks about external factors, industry trends, or real-world events
-- The question asks about causes, reasons, or drivers beyond the data
-- The data shows a pattern but doesn't explain the underlying cause
-
-Respond with ONLY "YES" or "NO" followed by a brief one-line reason.
-Format: YES|reason or NO|reason
-"""
+        prompt = get_search_decision_prompt(
+            question=question,
+            internal_summary=internal_summary,
+            internal_struct=internal_struct
+        )
         try:
             resp = judge.invoke(prompt)
             decision_text = getattr(resp, "content", str(resp)).strip().upper()

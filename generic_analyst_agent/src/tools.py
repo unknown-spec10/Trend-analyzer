@@ -19,6 +19,8 @@ import ast
 import pandas as pd
 from langchain.tools import tool
 from langchain_groq import ChatGroq
+
+from .prompts import get_data_analysis_prompt
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from .data_source import BaseDataSource
@@ -79,111 +81,15 @@ class DataQueryTool:
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
         date_cols = df.select_dtypes(include=['datetime']).columns.tolist()
         
-        instructions = f"""
-You are an expert data analyst. Given a pandas DataFrame named `df`, write Python code that:
-
-CRITICAL REQUIREMENTS:
-1. FIRST check if the question's key terms match the ACTUAL columns in the schema
-2. If the question asks about columns/concepts NOT in the dataset, return an error result
-3. Analyze the ACTUAL columns in the schema to understand the dataset domain
-4. Answer the user's question using ONLY the data present in `df`
-5. Build a STRUCTURED dictionary named `result` with these exact keys:
-   {{"metric": str, "value": number, "period": str, "segment": str, "unit": str, "details": dict, "summary": str}}
-
-ERROR HANDLING FOR MISMATCHED QUESTIONS:
-If the user asks about data that doesn't exist (e.g., "stock price" when there's no stock column), return:
-{{
-    "metric": "error",
-    "value": None,
-    "period": "unknown",
-    "segment": "unknown",
-    "unit": "unknown",
-    "details": {{}},
-    "summary": "Unable to answer: question asks about data not present in this dataset"
-}}
-
-FIELD SPECIFICATIONS:
-- `metric`: Short name describing what was measured (e.g., "regional_distribution", "gender_breakdown")
-- `value`: PRIMARY numeric answer (count, sum, average, percentage) - this is the MAIN result
-- `period`: Time window if dates exist; otherwise "full_dataset" or describe the data scope
-- `segment`: The primary grouping/category/demographic that answers the question
-  * Inspect the user's question - if they ask about "region", use the region with highest value
-  * If they ask about "gender" or "sex", use the dominant gender
-  * If they ask about multiple dimensions, pick the MOST relevant one as segment
-- `unit`: Appropriate unit ("records", "claims", "patients", "USD", "percentage", etc.)
-- `details`: Dict with secondary breakdowns - MUST contain ACTUAL VALUES from the data
-  * For multi-part questions, put the answer to the secondary part here
-  * Example: If asking "which region claimed most AND which gender in that region", `details` should have {{"by_gender": {{"male": <number>, "female": <number>}}}}
-  * NEVER use region names or other dimension values as keys in gender breakdowns
-- `summary`: 1-2 sentence plain English answer to the question with ALL key numbers including secondary dimensions
-
-DATASET CONTEXT (adapt your analysis to these columns):
-- Numeric columns: {numeric_cols}
-- Categorical columns: {categorical_cols}
-- Date columns: {date_cols}
-
-CODE RULES:
-- Build a dict named `result` with ALL required keys (metric, value, period, segment, unit, details, summary)
-- At the end, print ONLY: print(json.dumps(result))
-- Do NOT import anything (json, pd, int, float, str, dict already available)
-- Do NOT use print for anything else (no debug prints)
-- Do NOT write comments, explanations, or markdown
-- Use df.columns to verify column names before filtering
-- Handle missing values gracefully with .dropna() or .fillna()
-- Ensure `value` is numeric (use int() or float() to convert)
-- Output ONLY executable Python code (no ```python fences, no explanations)
-
-EXAMPLE CODE STRUCTURE:
-# Find the answer using pandas
-result_value = ...  # your calculation
-result = {{
-    "metric": "descriptive_name",
-    "value": int(result_value),
-    "period": "full_dataset",
-    "segment": "category_name",
-    "unit": "records",
-    "details": {{}},
-    "summary": "Plain English answer"
-}}
-print(json.dumps(result))
-
-EXAMPLE FOR MULTI-DIMENSIONAL QUESTIONS:
-# Question: "Which region has the most claims and which gender in that region has more?"
-# Step 1: Find the region with highest claims
-region_totals = df.groupby('region')['claim'].sum()
-top_region = region_totals.idxmax()
-top_region_value = int(region_totals.max())
-
-# Step 2: Within that region, find gender breakdown
-region_data = df[df['region'] == top_region]
-gender_totals = region_data.groupby('gender')['claim'].sum()
-
-# Step 3: Build result with BOTH answers
-result = {{
-    "metric": "regional_claim_analysis",
-    "value": top_region_value,
-    "period": "full_dataset",
-    "segment": top_region,
-    "unit": "USD",
-    "details": {{
-        "by_gender": gender_totals.to_dict(),
-        "top_gender": gender_totals.idxmax(),
-        "top_gender_amount": int(gender_totals.max())
-    }},
-    "summary": f"The {{top_region}} region has the highest claims ({{top_region_value}} USD). Within this region, {{gender_totals.idxmax()}} has claimed more ({{int(gender_totals.max())}} USD vs {{int(gender_totals.min())}} USD)."
-}}
-print(json.dumps(result))
-
-User question:
-{user_query}
-
-DataFrame schema:
-{schema_info}
-
-Data sample (first 10 rows):
-{head_str}
-        """
-        return textwrap.dedent(instructions).strip()
+        # Use centralized prompt
+        return get_data_analysis_prompt(
+            user_query=user_query,
+            schema_info=schema_info,
+            head_str=head_str,
+            numeric_cols=numeric_cols,
+            categorical_cols=categorical_cols,
+            date_cols=date_cols
+        )
 
     def _run_query(self, user_query: str) -> Any:
         import logging
@@ -206,10 +112,13 @@ Data sample (first 10 rows):
                 logger.debug(f"Generated code:\n{code}")
                 
                 result = self._execute_code(code, df)
-                
-                # If result is a valid structured dict, return it
+
+                # If result is a valid structured dict, attach generated code for UI visibility
                 if isinstance(result, dict) and "metric" in result:
                     logger.info("Successfully generated structured result")
+                    # Only attach code if not already present
+                    if "generated_code" not in result:
+                        result["generated_code"] = code.strip()
                     return result
                 
                 # Log what we got instead
@@ -231,7 +140,9 @@ Data sample (first 10 rows):
         
         # If all attempts fail, use generic fallback
         logger.warning(f"All code generation attempts failed. Last error: {last_error}. Using fallback.")
-        return self._fallback_fact(user_query, df)
+        fb = self._fallback_fact(user_query, df)
+        fb["generated_code"] = None  # indicate no code produced
+        return fb
 
     def _sanitize_generated_code(self, code: str) -> str:
         """Remove unsafe or disallowed constructs from model-generated code.
