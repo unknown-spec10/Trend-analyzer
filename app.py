@@ -201,8 +201,8 @@ if uploaded is not None:
 st.subheader("Chat")
 chat_container = st.container()
 
-# Summary table of past questions & concise pandas queries
-if st.session_state.history:
+# Summary table of past questions & concise pandas queries (only when context is shown)
+if show_context and st.session_state.history:
     st.markdown("### 🧾 Pandas Query Log")
     # Build a compact table
     data = []
@@ -321,8 +321,8 @@ with chat_container:
                 if turn.get("internal_context"):
                     st.markdown("**Internal Context**")
                     st.write(turn.get("internal_context"))
-            # Always show concise pandas query if available
-            if turn.get("pandas_query"):
+            # Show concise pandas query if available and context is enabled
+            if show_context and turn.get("pandas_query"):
                 st.markdown("**Pandas Query**")
                 st.code(turn.get("pandas_query"), language="python")
             # Show generated pandas code (if available and context is on)

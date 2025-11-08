@@ -379,27 +379,42 @@ def create_agent_executor(tools: List[Any]):
         # Check if the result is empty, trivial, or indicates the question doesn't match the data
         is_valid_result = True
         error_message = None
-        
+
+        # Pre-compute value/details status
+        value_is_empty = (
+            value is None or (isinstance(value, str) and value.lower() in ['none', 'null', 'unknown', 'n/a', ''])
+        )
+        details_obj = struct.get("details") if isinstance(struct, dict) else None
+        details_has_content = False
+        if isinstance(details_obj, dict):
+            for v in details_obj.values():
+                if isinstance(v, dict) and len(v) > 0:
+                    details_has_content = True
+                    break
+                if isinstance(v, list) and len(v) > 0:
+                    details_has_content = True
+                    break
+
         # Check 1: Explicit error metric (LLM detected mismatch)
         if metric == "error":
             is_valid_result = False
             error_message = "Question doesn't match dataset columns"
-        
-        # Check 2: No meaningful value extracted
-        elif value is None or (isinstance(value, str) and value.lower() in ['none', 'null', 'unknown', 'n/a', '']):
+
+        # Check 2: No meaningful value extracted AND no useful details
+        elif value_is_empty and not details_has_content:
             is_valid_result = False
             error_message = "Unable to find relevant data"
-        
+
         # Check 3: Metric is unknown (indicates data extraction failed)
         elif metric == "unknown" or metric is None:
             is_valid_result = False
             error_message = "Unable to understand question in context of dataset"
-        
+
         # Check 4: Empty or trivial summary
         elif not internal_summary or len(internal_summary.strip()) < 10:
             is_valid_result = False
             error_message = "No meaningful information extracted from dataset"
-        
+
         # Check 5: Summary indicates error or inability to answer
         elif any(phrase in internal_summary.lower() for phrase in [
             'unable to', 'cannot find', 'no data', 'does not exist', 'not found',
