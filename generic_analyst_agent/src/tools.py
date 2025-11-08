@@ -165,8 +165,15 @@ class DataQueryTool:
                     continue
 
             except Exception as e:
+                error_str = str(e).lower()
                 logger.warning(f"Exception in attempt {attempt + 1}: {e}")
                 last_error = str(e)
+                
+                # If rate limit hit, break retry loop and go to Gemini fallback immediately
+                if "rate limit" in error_str or "429" in error_str or "too many requests" in error_str:
+                    logger.warning("Rate limit detected, skipping retries and using Gemini fallback")
+                    break
+                
                 if attempt < max_attempts - 1:
                     prompt += f"\n\nPREVIOUS ATTEMPT FAILED:\n{str(e)}\n\nPlease fix the code and try again."
                     continue

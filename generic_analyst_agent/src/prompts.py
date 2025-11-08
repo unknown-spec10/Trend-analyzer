@@ -166,7 +166,14 @@ FIELD SPECIFICATIONS (adapt to YOUR data):
   * For "for each X" questions, put per-group breakdown in details as {{"by_X": {{group1: value1, group2: value2}}}}
   * Example: "average claim for each region" → details should have {{"by_region": {{"northwest": 1234, "southeast": 5678}}}}
   * NEVER use dimension values as nested keys - keep structure flat
-- `summary`: Plain English answer with actual numbers from YOUR calculation
+- `summary`: **CRITICAL FORMATTING RULES**
+  * Use clean bullet points with consistent formatting when presenting multiple values
+  * For multi-metric answers, structure as: "Overall: [stats]. By category: • Cat1: min X, max Y, avg Z • Cat2: min X, max Y, avg Z"
+  * Use proper number formatting with commas for thousands (e.g., 13,252.75 not 13252.75)
+  * Keep consistent currency symbols and units throughout
+  * Maximum 2-3 sentences or 5-6 bullet points
+  * Example GOOD: "Overall claim range: $1,121.87 to $63,770.43 (avg: $13,279.67). By region: • Northeast: $1,694.80 - $58,571.07 (avg: $16,889.04) • Northwest: $1,136.40 - $60,021.40 (avg: $11,672.09)"
+  * Example BAD: Long run-on sentences with inconsistent formatting
 
 ⚠️ CRITICAL - MULTI-METRIC QUESTIONS (READ CAREFULLY):
 When user asks for MULTIPLE metrics in ONE question (e.g., "min, max, and average" OR "minimum, maximum, and mean"):
@@ -191,7 +198,6 @@ When user asks "for each [category]" or "by [category]", they want per-group res
 - Put the primary answer (e.g., average across all groups) in `value`
 - Put the per-group breakdown in `details` under key "by_[category]"
 - Include ALL groups in the breakdown, not just top/bottom
-- Example: "average claim for each region" should have details={{"by_region": {{"northwest": 1234, "southeast": 5678, ...}}}}
 
 AVAILABLE COLUMNS IN THIS DATASET:
 - Numeric: {numeric_cols if has_numeric else "None"}

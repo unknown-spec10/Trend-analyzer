@@ -7,11 +7,14 @@ A dynamic, dataset-agnostic data analysis agent that combines internal data insi
 ### Intelligent Adaptive Workflow
 - **Smart Decision Making**: Automatically determines if external web research is needed
 - **Dynamic Analysis**: Works with ANY CSV structure without hardcoded assumptions
-- **Multi-dimensional Queries**: Handles complex questions involving multiple data dimensions
+- **Multi-Metric Support**: Handles questions requesting multiple statistics (min, max, average, etc.)
+- **Intelligent Validation**: Pre-validates questions against dataset columns to prevent errors
+- **Dual LLM System**: Groq (primary) with automatic Gemini fallback on rate limits
 - **Source Citations**: Provides clickable links to all external sources used in analysis
 - **Conversation History**: Follow-up questions automatically reference previous context
 - **Question Suggestions**: AI generates 5-7 relevant questions based on your dataset
 - **Session Caching**: Repeated questions use cached results (1-hour TTL)
+- **Clean Formatting**: Automatically formats summaries with proper bullet points and number formatting
 
 ### Architecture Highlights
 - **Dataset Agnostic**: Inspects CSV schema dynamically and adapts analysis approach
@@ -93,19 +96,6 @@ START → Analyze Internal Data → Decide if Search Needed → [Conditional]
 3. **Web Research** (conditional): Searches for external factors and causes
 4. **Synthesis**: Combines data insights with research into comprehensive answer
 
-### Example Questions
-
-**Medical Insurance Dataset:**
-- "Which region has claimed most and which gender in that region has claimed more?"
-- "What are the possible causes for high claims in the southeast region?"
-
-**Sales Dataset:**
-- "Which product category had the highest revenue last quarter?"
-- "Why did sales drop in the northeast region?"
-
-**Any CSV:**
-- "What patterns do you see in the data?"
-- "What are the top 3 segments by volume?"
 
 ## 🏗️ Project Structure
 
@@ -141,23 +131,26 @@ Trend-analyzer/
 ### Technologies
 - **LangGraph**: Agent orchestration with conditional workflows
 - **LangChain**: Tool integration and LLM abstraction
-- **Groq (Llama 3.1 8B)**: Fast LLM inference for code generation
+- **Groq (Llama 3.1 8B)**: Primary LLM for fast code generation (temperature=0.2)
+- **Google Gemini 2.0 Flash Exp**: Fallback LLM for rate limits and question generation
 - **Google Custom Search**: Web research capabilities
-- **Google Gemini 2.5 Flash**: Web content synthesis
-- **Streamlit**: Interactive web UI
-- **Pandas**: Data manipulation
+- **Streamlit**: Interactive web UI with live agent status updates
+- **Pandas**: Data manipulation and analysis
 
 ### Code Execution Safety
-The `DataQueryTool` uses Python's `exec()` to run LLM-generated pandas code. Current safety measures:
-- Restricted `__builtins__` (limited to safe functions)
-- No import statements allowed
-- Code sanitization and validation
-- Captured stdout for controlled output
+The `DataQueryTool` uses sandboxed execution for LLM-generated pandas code. Current safety measures:
+- **Question Validation**: Pre-checks if question matches dataset columns
+- **Subprocess Isolation**: Code runs in separate process (Unix) with resource limits
+- **Memory Limit**: 512MB cap on code execution
+- **Time Limit**: 30-second timeout for queries
+- **Restricted Builtins**: No file I/O, no imports, limited functions
+- **Code Sanitization**: Removes dangerous patterns before execution
+- **Error Recovery**: Automatic Gemini fallback on code generation failures
 
-**⚠️ Production Warning**: For production use, implement:
-- Process isolation (containers, VMs)
-- Resource limits (CPU, memory, time)
-- Stricter sandboxing
+**⚠️ Production Warning**: For high-security production use, implement:
+- Container isolation (Docker, Kubernetes)
+- Network restrictions
+- Audit logging
 - Code review/approval workflows
 
 ### Dynamic Features
@@ -171,9 +164,11 @@ The `DataQueryTool` uses Python's `exec()` to run LLM-generated pandas code. Cur
 ```
 
 #### 2. Adaptive Prompts
-- Provides column-specific guidance to LLM
-- Includes example code for multi-dimensional queries
-- Adjusts based on dataset structure
+- **Fully Dynamic**: No hardcoded column names or assumptions
+- **Column-Specific Guidance**: Tailored instructions based on actual columns
+- **Multi-Metric Examples**: Shows how to calculate min, max, mean simultaneously
+- **Format Guidelines**: Instructs LLM to use clean bullet points and number formatting
+- **Context-Aware**: Adjusts based on dataset structure (numeric, categorical, date columns)
 
 #### 3. Intelligent Search
 - LLM generates contextual search queries
@@ -201,11 +196,21 @@ The `DataQueryTool` uses Python's `exec()` to run LLM-generated pandas code. Cur
 - **CSV Upload**: Drag-and-drop or browse for any CSV file
 - **Data Preview**: See first 10 rows and column info
 - **Quick Statistics**: Memory usage, null counts, row/column totals
-- **Chat Interface**: Conversational Q&A about your data
-- **Context Toggle**: Show/hide internal facts and external research
+- **Chat Interface**: Modern chat input with auto-clear after submission
+- **Live Agent Status**: Expandable status box showing agent thinking steps
+  - 📊 Analyzing internal data...
+  - 🤔 Determining if external research is needed...
+  - 🧠 Processing your question...
+  - ✅ Analysis complete!
+- **Context Display**: Toggle to show/hide:
+  - 📊 Dataset Context (columns, types, sample data)
+  - 🐼 Pandas Query (concise one-line query used)
+  - 🧪 Full Generated Code (expandable)
+- **Clean Formatting**: Properly formatted summaries with bullet points and currency
 - **Source Citations**: Clickable links to all web sources
 - **Conversation History**: All Q&A pairs preserved in session
 - **Question Suggestions**: AI-generated questions in sidebar (5-7 suggestions)
+  - Gemini-based generation with ultimate fallback
   - Click any suggestion to auto-fill the input
   - Based on dataset schema and statistics
   - Mix of aggregation, comparison, trend, and outlier questions
@@ -335,9 +340,17 @@ View generated pandas code and execution results in console.
 ```
 
 **Rate Limits**:
-- Groq: 14,400 requests/day, 6,000 tokens/minute
-- Google CSE: 100 queries/day (free tier)
+- **Groq**: 14,400 requests/day, 6,000 tokens/minute
+  - System automatically switches to Gemini fallback on rate limits
+  - Check logs for "Rate limit detected, using Gemini fallback"
+- **Google Gemini**: 1,500 requests/day (free tier)
+- **Google CSE**: 100 queries/day (free tier)
 - Consider upgrading for production use
+
+**Gemini Fallback Not Working**:
+- Verify `GEMINI_API_KEY` is set in `.env`
+- Check logs for fallback trigger messages
+- Ensure google-generativeai package is installed
 
 ### Import Errors
 

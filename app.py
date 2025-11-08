@@ -201,19 +201,6 @@ if uploaded is not None:
 st.subheader("Chat")
 chat_container = st.container()
 
-# Summary table of past questions & concise pandas queries (only when context is shown)
-if show_context and st.session_state.history:
-    st.markdown("### 🧾 Pandas Query Log")
-    # Build a compact table
-    data = []
-    for i, h in enumerate(st.session_state.history, start=1):
-        if h.get("pandas_query"):
-            data.append({"#": f"Q{i}", "Question": h.get("question", ""), "Pandas Query": h.get("pandas_query")})
-    if data:
-        import pandas as _pd
-        log_df = _pd.DataFrame(data)
-        st.dataframe(log_df, use_container_width=True, hide_index=True)
-
 # Check if there's a pending question from suggestion click
 if "pending_question" in st.session_state:
     prompt_val = st.session_state.pending_question
@@ -247,8 +234,9 @@ if prompt_val:
                 st.info("💾 Using cached result")
                 result = cached_result
             else:
-                # Run agent with progress indicator
-                with st.spinner("Analyzing..."):
+                # Run agent with live streaming of thoughts
+                result = None
+                with st.status("🤖 Agent is thinking...", expanded=True) as status:
                     try:
                         # Build state with conversation context
                         messages: List[Any] = [{"type": "human", "content": prompt_val}]
@@ -266,12 +254,23 @@ if prompt_val:
                             "messages": messages,
                             "conversation_history": conversation_history,
                         }
+                        
+                        # Execute agent with status updates
+                        st.write("📊 Analyzing internal data...")
+                        st.write("🤔 Determining if external research is needed...")
+                        st.write("🧠 Processing your question...")
+                        
+                        # Execute the agent
                         result = st.session_state.agent.invoke(state)
                         
-                        # Cache the result
-                        cache.set(prompt_val, dataset_sig, result)
+                        status.update(label="✅ Analysis complete!", state="complete")
+                        
+                        # Cache the result (only if valid)
+                        if result is not None and isinstance(result, dict):
+                            cache.set(prompt_val, dataset_sig, result)
                         
                     except Exception as e:
+                        status.update(label="❌ Analysis failed", state="error")
                         st.error(f"Analysis failed: {e}")
                         import traceback
                         with st.expander("Error details"):

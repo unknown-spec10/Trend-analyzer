@@ -374,6 +374,22 @@ def create_agent_executor(tools: List[Any]):
         
         # Extract the plain-English summary from struct if available
         internal_summary = struct.get("summary", "")
+        
+        # Clean up messy formatting in summary (remove extra spaces, fix number formatting)
+        if internal_summary:
+            import re
+            # Fix numbers that got split with spaces (e.g., "1 , 121.87" -> "1,121.87")
+            internal_summary = re.sub(r'(\d+)\s*,\s*(\d+)', r'\1,\2', internal_summary)
+            # Fix currency that got separated (e.g., "$ 12" -> "$12")
+            internal_summary = re.sub(r'\$\s+', r'$', internal_summary)
+            # Fix ranges that got mangled (e.g., "87to63" -> "87 to 63")
+            internal_summary = re.sub(r'(\d)([a-z]+)(\d)', r'\1 \2 \3', internal_summary)
+            # Remove excessive spaces
+            internal_summary = re.sub(r'\s+', ' ', internal_summary)
+            # Fix parentheses spacing (e.g., "( 123" -> "(123")
+            internal_summary = re.sub(r'\(\s+', '(', internal_summary)
+            internal_summary = re.sub(r'\s+\)', ')', internal_summary)
+            internal_summary = internal_summary.strip()
 
         # Validate that we got meaningful data from the dataset
         # Check if the result is empty, trivial, or indicates the question doesn't match the data
@@ -606,18 +622,47 @@ def create_agent_executor(tools: List[Any]):
         system = ROOT_CAUSE_ANALYST_PROMPT
         
         if not used_search or not external:
-            # Data-only answer: concise, factual, no external citations needed
-            user = (
-                f"Question: {question}\n\n"
-                f"Internal Data Analysis:\n{internal_summary}\n\n"
-                f"Structured Details: {internal_for_prompt}\n\n"
-                "Write a concise, data-driven answer:\n"
-                "- 3-5 bullets highlighting key findings from the data\n"
-                "- 1-2 sentences synthesizing the pattern or insight\n"
-                "- Note that this answer is based entirely on the provided dataset\n"
-            )
+            # Data-only answer: Use the clean summary from the data tool directly
+            # The summary is already well-formatted with proper numbers and structure
+            details = internal_struct.get("details", {})
+            
+            # Build a clean, formatted answer from the structured data
+            answer_parts = []
+            answer_parts.append(f"**{question}**\n")
+            answer_parts.append(f"\n{internal_summary}\n")
+            
+            # Add detailed breakdown if available in details
+            if isinstance(details, dict):
+                # Check for multi-metric details (min/max/mean by category)
+                has_multi_metric = any(key.startswith("by_") for key in details.keys())
+                if has_multi_metric:
+                    answer_parts.append("\n**Detailed Breakdown:**")
+                    for key, value in details.items():
+                        if key.startswith("by_") and isinstance(value, dict):
+                            category_name = key.replace("by_", "").replace("_", " ").title()
+                            answer_parts.append(f"\n{category_name}:")
+                            for cat, metrics in value.items():
+                                if isinstance(metrics, dict):
+                                    metrics_str = ", ".join([f"{k}: ${v:,.2f}" if isinstance(v, (int, float)) else f"{k}: {v}" 
+                                                            for k, v in metrics.items()])
+                                    answer_parts.append(f"  • {cat.capitalize()}: {metrics_str}")
+                                else:
+                                    answer_parts.append(f"  • {cat}: {metrics:,.2f}" if isinstance(metrics, (int, float)) else f"  • {cat}: {metrics}")
+            
+            final_text = "\n".join(answer_parts)
+            
+            # Skip LLM synthesis for data-only questions to preserve clean formatting
+            msgs = state.get("messages", [])
+            previous_facts = state.get("previous_facts", []) or []
+            previous_facts.append(internal_struct)
+            
+            return {
+                "messages": msgs + [{"type": "ai", "content": final_text}],
+                "final_answer": final_text,
+                "previous_facts": previous_facts,
+            }
         else:
-            # Combined answer: data + external research
+            # Combined answer: data + external research - use LLM to synthesize
             user = (
                 f"Question: {question}\n\n"
                 f"Internal Data: {internal_summary}\n"
@@ -629,11 +674,37 @@ def create_agent_executor(tools: List[Any]):
                 "- 'Confidence' line explaining how well data + research answer the question\n"
                 "- 'Limitations' line noting any data gaps or assumptions\n"
             )
-        
-        t0 = time.perf_counter()
-        response = llm.invoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
-        logger.info("synthesis duration_ms=%.1f", (time.perf_counter() - t0) * 1000.0)
-        final_text = getattr(response, "content", str(response))
+            
+            t0 = time.perf_counter()
+            try:
+                response = llm.invoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+                logger.info("synthesis duration_ms=%.1f", (time.perf_counter() - t0) * 1000.0)
+                final_text = getattr(response, "content", str(response))
+            except Exception as e:
+                error_str = str(e).lower()
+                logger.warning(f"Synthesis LLM failed: {e}")
+                
+                # If rate limit or other Groq error, use Gemini fallback
+                if "rate limit" in error_str or "429" in error_str or "too many requests" in error_str:
+                    logger.info("Rate limit detected in synthesis, using Gemini fallback")
+                else:
+                    logger.info("Groq synthesis failed, attempting Gemini fallback")
+                
+                try:
+                    import google.generativeai as genai
+                    from generic_analyst_agent.src.config import GEMINI_API_KEY
+                    
+                    genai.configure(api_key=GEMINI_API_KEY)
+                    gemini_model = genai.GenerativeModel("gemini-2.0-flash-exp")
+                    
+                    gemini_prompt = f"{system}\n\n{user}"
+                    gemini_response = gemini_model.generate_content(gemini_prompt)
+                    final_text = gemini_response.text
+                    logger.info("Gemini synthesis successful")
+                except Exception as gemini_error:
+                    logger.error(f"Gemini fallback also failed: {gemini_error}")
+                    # Return a basic formatted answer as last resort
+                    final_text = f"**Answer:**\n\n{internal_summary}\n\n(Note: Enhanced synthesis unavailable due to API limitations)"
 
         msgs = state.get("messages", [])
         
