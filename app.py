@@ -250,7 +250,8 @@ if prompt_val:
                                 "fact": h.get("internal_fact"),
                             })
                         
-                        state = {
+                        # Build AgentState-compatible dict
+                        state: dict[str, Any] = {
                             "messages": messages,
                             "conversation_history": conversation_history,
                         }
@@ -260,8 +261,20 @@ if prompt_val:
                         st.write("🤔 Determining if external research is needed...")
                         st.write("🧠 Processing your question...")
                         
-                        # Execute the agent
-                        result = st.session_state.agent.invoke(state)
+                        # Execute the agent with streaming events
+                        stream_placeholder = st.empty()
+                        final_state = None
+                        for evt in st.session_state.agent.stream(state):
+                            stage = evt.get("stage")
+                            msg = evt.get("message") or ""
+                            # Render incremental thinking
+                            with stream_placeholder.container():
+                                st.markdown(f"**Stage:** {stage}")
+                                if msg:
+                                    st.markdown(msg)
+                            if evt.get("final"):
+                                final_state = evt.get("state")
+                        result = final_state or {}
                         
                         status.update(label="✅ Analysis complete!", state="complete")
                         
@@ -288,12 +301,13 @@ if prompt_val:
                 record = {
                     "question": prompt_val,
                     "final_answer": result.get("final_answer"),
-                    "internal_fact": result.get("internal_fact"),  # Always capture for code extraction
+                    "internal_fact": result.get("internal_fact"),
                     "internal_context": result.get("internal_context") if show_context else None,
                     "external_context": result.get("external_context") if show_context else None,
-                    "sources": result.get("sources"),  # Always capture sources
-                    "generated_code": generated_code,  # Store separately for easy access
+                    "sources": result.get("sources"),
+                    "generated_code": generated_code,
                     "pandas_query": extract_concise_pandas_query(generated_code) if generated_code else None,
+                    "thinking_trace": " | ".join([m.get("content", "") for m in (result.get("messages") or []) if isinstance(m, dict) and m.get("type") == "ai"])[:2000]
                 }
                 if not (
                     len(st.session_state.history) > 0

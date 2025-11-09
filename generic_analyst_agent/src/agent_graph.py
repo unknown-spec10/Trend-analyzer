@@ -10,7 +10,7 @@ the internal data is insufficient to answer the user's question.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict, cast
 import json
 import logging
 import time
@@ -845,4 +845,66 @@ def create_agent_executor(tools: List[Any]):
     graph.add_edge("call_search_tool", "synthesize_answer")
     graph.add_edge("synthesize_answer", END)
 
-    return graph.compile()
+    compiled = graph.compile()
+
+    class AgentExecutor:
+        """Wrapper providing both invoke() and stream() execution modes."""
+
+        def __init__(self):
+            self._compiled = compiled
+
+        def invoke(self, state: AgentState) -> Any:  # type: ignore[override]
+            return self._compiled.invoke(state)
+
+        def stream(self, state: Dict[str, Any]):
+            """Yield step-by-step progress events with incremental state updates.
+
+            Each yielded item is a dict like:
+            {"stage": str, "message": str | None, "state": AgentState | None, ...}
+            """
+            # Step 1: Clarification / validation
+            s0 = cast(AgentState, state)
+            yield {"stage": "start", "message": "Analyzing question...", "state": s0}
+            s1 = detect_clarification_need(s0)
+            last_msg = None
+            if s1.get("messages"):
+                msgs_list = s1.get("messages") or []
+                if isinstance(msgs_list, list) and len(msgs_list) > 0 and isinstance(msgs_list[-1], dict):
+                    last_msg = msgs_list[-1].get("content")
+            yield {"stage": "clarify", "message": last_msg, "state": s1}
+
+            if route_after_clarification(s1) == "END":
+                yield {"stage": "end", "message": "Stopped after validation.", "state": s1, "final": True}
+                return
+
+            # Step 2: Data tool
+            yield {"stage": "data", "message": "Querying dataset...", "state": s1}
+            s2 = call_data_tool(s1)
+            internal_summary = s2.get("internal_summary") or ""
+            msg2 = f"Internal summary: {internal_summary}" if internal_summary else "Internal data extracted."
+            yield {"stage": "data", "message": msg2, "state": s2}
+
+            if route_after_data_tool(s2) == "END":
+                yield {"stage": "end", "message": "Answer produced from validation outcome.", "state": s2, "final": True}
+                return
+
+            # Step 3: Decision
+            yield {"stage": "decision", "message": "Deciding whether to search the web...", "state": s2}
+            s3 = decide_if_search_needed(s2)
+            needs = s3.get("needs_external_search", True)
+            yield {"stage": "decision", "message": ("External search is needed" if needs else "Internal data is sufficient"), "state": s3}
+
+            # Step 4 (optional): Search
+            s4 = s3
+            if needs:
+                yield {"stage": "search", "message": "Gathering external context...", "state": s3}
+                s4 = call_search_tool(s3)
+                ext = (s4.get("external_context") or "")[:200]
+                yield {"stage": "search", "message": f"External context summarized: {ext}...", "state": s4}
+
+            # Step 5: Synthesis
+            yield {"stage": "synthesis", "message": "Composing the final answer...", "state": s4}
+            s5 = synthesize_answer(s4)
+            yield {"stage": "end", "message": "Done.", "state": s5, "final": True}
+
+    return AgentExecutor()
