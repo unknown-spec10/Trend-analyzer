@@ -107,22 +107,23 @@ def get_data_analysis_prompt(user_query: str, schema_info: str, head_str: str,
     if has_dates:
         column_guidance.append(f"- You can analyze trends over time using: {', '.join(date_cols[:3])}")
     
-    # Determine appropriate unit based on data (smart inference)
+    # Determine appropriate unit based on data (smart inference using generic patterns)
     sample_numeric = numeric_cols[0] if has_numeric else None
     unit_hint = "records"  # Default
     if sample_numeric:
         col_lower = sample_numeric.lower()
-        if any(term in col_lower for term in ['price', 'cost', 'revenue', 'amount', 'claim', 'salary', 'payment', 'fee', 'charge']):
+        # Use pattern matching instead of hardcoded terms
+        if any(term in col_lower for term in ['price', 'cost', 'amount', 'value', 'payment', 'fee', 'charge', 'paid', 'spent', 'earned']):
             unit_hint = "currency (USD/EUR/etc.)"
-        elif any(term in col_lower for term in ['temp', 'temperature', 'celsius', 'fahrenheit']):
+        elif any(term in col_lower for term in ['temp', 'temperature', 'celsius', 'fahrenheit', 'degree']):
             unit_hint = "temperature units"
-        elif any(term in col_lower for term in ['count', 'quantity', 'number', 'total']):
+        elif any(term in col_lower for term in ['count', 'quantity', 'number', 'total', 'num', 'qty']):
             unit_hint = "count"
-        elif any(term in col_lower for term in ['percent', 'rate', 'ratio', 'proportion']):
+        elif any(term in col_lower for term in ['percent', 'rate', 'ratio', 'proportion', 'pct', '%']):
             unit_hint = "percentage"
-        elif any(term in col_lower for term in ['weight', 'mass', 'kg', 'lb']):
+        elif any(term in col_lower for term in ['weight', 'mass', 'kg', 'lb', 'gram', 'ounce']):
             unit_hint = "weight units"
-        elif any(term in col_lower for term in ['distance', 'length', 'km', 'mile']):
+        elif any(term in col_lower for term in ['distance', 'length', 'km', 'mile', 'meter', 'feet']):
             unit_hint = "distance units"
     
     # Generate adaptive examples based on actual columns
@@ -164,7 +165,7 @@ FIELD SPECIFICATIONS (adapt to YOUR data):
 - `details`: Dict with secondary breakdowns using YOUR column names
   * For multi-part questions, put the answer to the secondary part here
   * For "for each X" questions, put per-group breakdown in details as {{"by_X": {{group1: value1, group2: value2}}}}
-  * Example: "average claim for each region" → details should have {{"by_region": {{"northwest": 1234, "southeast": 5678}}}}
+  * Example structure: details should have {{"by_category": {{"value1": 1234, "value2": 5678}}}}
   * NEVER use dimension values as nested keys - keep structure flat
 - `summary`: **CRITICAL FORMATTING RULES**
   * Use clean bullet points with consistent formatting when presenting multiple values
@@ -172,7 +173,7 @@ FIELD SPECIFICATIONS (adapt to YOUR data):
   * Use proper number formatting with commas for thousands (e.g., 13,252.75 not 13252.75)
   * Keep consistent currency symbols and units throughout
   * Maximum 2-3 sentences or 5-6 bullet points
-  * Example GOOD: "Overall claim range: $1,121.87 to $63,770.43 (avg: $13,279.67). By region: • Northeast: $1,694.80 - $58,571.07 (avg: $16,889.04) • Northwest: $1,136.40 - $60,021.40 (avg: $11,672.09)"
+  * Example structure: "Overall range: VALUE_MIN to VALUE_MAX (avg: VALUE_AVG). By category: • Cat1: MIN - MAX (avg: AVG) • Cat2: MIN - MAX (avg: AVG)"
   * Example BAD: Long run-on sentences with inconsistent formatting
 
 ⚠️ CRITICAL - MULTI-METRIC QUESTIONS (READ CAREFULLY):
@@ -242,7 +243,7 @@ DATA PATTERN:
 
 Generate a search query that:
 1. Focuses on CAUSES, TRENDS, or EXTERNAL FACTORS
-2. Uses specific terms from the data (region, demographic, category)
+2. Uses specific terms from the data (actual column names and values)
 3. Avoids generic terms
 4. Is 5-10 words long
 
@@ -296,14 +297,14 @@ CURRENT FOLLOW-UP:
 Task: Rewrite the follow-up as a complete, standalone question that includes the necessary context.
 
 Example 1:
-Previous: "Which region claimed the most?"
-Follow-up: "What about females?"
-Expanded: "What is the total claimed by females in the region that claimed the most?"
+Previous: "Which category has the highest total?"
+Follow-up: "What about group B?"
+Expanded: "What is the total for group B in the category that has the highest total?"
 
 Example 2:
-Previous: "What are the top 3 products by sales?"
-Follow-up: "How about last year?"
-Expanded: "What are the top 3 products by sales for last year?"
+Previous: "What are the top 3 items by value?"
+Follow-up: "How about last period?"
+Expanded: "What are the top 3 items by value for last period?"
 
 Respond with ONLY the expanded question, no explanation.
 """

@@ -12,6 +12,7 @@ from typing import Dict, Any, List
 
 import pandas as pd
 from langchain_groq import ChatGroq
+from .groq_wrapper import GroqWithGeminiFallback
 
 from .prompts import get_question_suggestions_prompt
 
@@ -28,7 +29,7 @@ class QuestionSuggester:
             llm_model: The LLM model to use for generation
             temperature: Temperature for LLM (higher = more creative)
         """
-        self.llm = ChatGroq(model=llm_model, temperature=temperature)
+        self.llm = GroqWithGeminiFallback(model=llm_model, temperature=temperature)
         
     def generate_suggestions(
         self,

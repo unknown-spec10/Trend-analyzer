@@ -18,6 +18,7 @@ import time
 from langgraph.graph import END, StateGraph
 from langchain_core.messages import HumanMessage
 from langchain_groq import ChatGroq
+from .groq_wrapper import GroqWithGeminiFallback
 
 from .prompts import (
     ROOT_CAUSE_ANALYST_PROMPT,
@@ -64,9 +65,9 @@ def create_agent_executor(tools: List[Any]):
         raise ValueError(f"Missing required tools: {', '.join(missing)}")
 
     # Default Groq model for synthesis (GROQ_API_KEY is read from the environment)
-    llm = ChatGroq(
+    llm = GroqWithGeminiFallback(
         model="llama-3.1-8b-instant",
-        temperature=0.3
+        temperature=0.2
     )
     logger = logging.getLogger(__name__)
 
@@ -90,21 +91,40 @@ def create_agent_executor(tools: List[Any]):
         period = str(struct.get("period") or "").strip()
         metric = str(struct.get("metric") or "").strip()
         
-        # Use LLM to generate contextual search query
-        query_builder = ChatGroq(model="llama-3.1-8b-instant", temperature=0.3)
+        # Use LLM to generate contextual search query (with Gemini fallback)
         prompt = get_search_query_prompt(
             metric=metric,
             segment=segment,
             period=period,
             summary=summary[:200]
         )
+        
+        query = ""
         try:
+            query_builder = GroqWithGeminiFallback(model="llama-3.1-8b-instant", temperature=0.3)
             resp = query_builder.invoke(prompt)
             query = getattr(resp, "content", str(resp)).strip()
-            # Fallback if LLM fails
-            if not query or len(query) < 10:
-                query = f"{segment} {metric} {period} causes trends analysis"
-        except Exception:
+        except Exception as e:
+            error_str = str(e).lower()
+            if "429" in str(e) or "rate limit" in error_str or "quota" in error_str:
+                logger.warning("Groq rate limit in search query builder. Using Gemini fallback.")
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=config.GEMINI_API_KEY)
+                    model = genai.GenerativeModel("gemini-2.0-flash-exp")
+                    
+                    prompt_text = "\n".join([str(msg.get("content", msg)) if isinstance(msg, dict) else str(msg) for msg in (prompt if isinstance(prompt, list) else [prompt])])
+                    response = model.generate_content(prompt_text)
+                    query = response.text.strip()
+                except Exception as fallback_error:
+                    logger.error(f"Gemini fallback failed: {fallback_error}")
+                    query = ""
+            else:
+                logger.warning(f"Query builder failed: {e}")
+                query = ""
+        
+        # Fallback if LLM fails or returns empty
+        if not query or len(query) < 10:
             query = f"{segment} {metric} {period} causes trends analysis"
 
         windows = ["m6", "y1", "d30"]
@@ -121,17 +141,31 @@ def create_agent_executor(tools: List[Any]):
 
     def _tight_bulleted_summary(text: str) -> str:
         """Create a bullet-first, length-constrained summary of external context."""
-        summer = ChatGroq(model="llama-3.1-8b-instant", temperature=0.2)
+        summer = GroqWithGeminiFallback(model="llama-3.1-8b-instant", temperature=0.2)
         prompt = get_context_summary_prompt(text=text)
         try:
             resp = summer.invoke(prompt)
             return getattr(resp, "content", str(resp)).strip()
-        except Exception:
+        except Exception as e:
+            error_str = str(e).lower()
+            if "429" in str(e) or "rate limit" in error_str or "quota" in error_str:
+                logger.warning("Groq rate limit in context summarizer. Using Gemini fallback.")
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=config.GEMINI_API_KEY)
+                    model = genai.GenerativeModel("gemini-2.0-flash-exp")
+
+                    prompt_text = "\n".join([str(msg.get("content", msg)) if isinstance(msg, dict) else str(msg) for msg in (prompt if isinstance(prompt, list) else [prompt])])
+                    response = model.generate_content(prompt_text)
+                    return response.text.strip()
+                except Exception as fallback_error:
+                    logger.error(f"Gemini fallback failed: {fallback_error}")
+                    return text
             return text
 
     def _judge_relevance(internal_struct: Dict[str, Any], context: str) -> float:
         """LLM-based relevance score between 0.0 and 1.0."""
-        judge = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
+        judge = GroqWithGeminiFallback(model="llama-3.1-8b-instant", temperature=0.0)
         brief = json.dumps({k: internal_struct.get(k) for k in ("metric", "value", "period", "segment", "unit")})
         prompt = get_relevance_score_prompt(
             internal_fact_brief=brief,
@@ -144,8 +178,24 @@ def create_agent_executor(tools: List[Any]):
             m = _re.search(r"\d+(?:\.\d+)?", txt)
             if m:
                 return max(0.0, min(1.0, float(m.group(0))))
-        except Exception:
-            pass
+        except Exception as e:
+            error_str = str(e).lower()
+            if "429" in str(e) or "rate limit" in error_str or "quota" in error_str:
+                logger.warning("Groq rate limit in relevance judge. Using Gemini fallback.")
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=config.GEMINI_API_KEY)
+                    model = genai.GenerativeModel("gemini-2.0-flash-exp")
+
+                    prompt_text = "\n".join([str(msg.get("content", msg)) if isinstance(msg, dict) else str(msg) for msg in (prompt if isinstance(prompt, list) else [prompt])])
+                    response = model.generate_content(prompt_text)
+                    txt = response.text.strip()
+                    import re as _re
+                    m = _re.search(r"\d+(?:\.\d+)?", txt)
+                    if m:
+                        return max(0.0, min(1.0, float(m.group(0))))
+                except Exception as fallback_error:
+                    logger.error(f"Gemini fallback failed: {fallback_error}")
         return 0.0
 
     def detect_clarification_need(state: AgentState) -> AgentState:
@@ -220,31 +270,25 @@ def create_agent_executor(tools: List[Any]):
             
             if is_valid:
                 # Check for keyboard mashing (e.g., "lklk;l", "asdfghjkl")
-                # Detect: high ratio of consonants, repeated patterns, no vowel-consonant alternation
+                # Use ONLY linguistic patterns - NO hardcoded word lists
                 words = re.findall(r'\b[a-zA-Z]{3,}\b', question_stripped.lower())
                 if words:
-                    # Check if it looks like random typing
+                    # Check if it looks like random typing using purely structural heuristics
                     has_meaningful_word = False
-                    common_words = {'what', 'which', 'who', 'where', 'when', 'why', 'how', 'show', 'get', 'find', 
-                                   'the', 'is', 'are', 'was', 'were', 'have', 'has', 'had', 'do', 'does', 'did',
-                                   'can', 'could', 'would', 'should', 'may', 'might', 'must', 'will', 'shall',
-                                   'top', 'bottom', 'highest', 'lowest', 'most', 'least', 'total', 'sum', 'average',
-                                   'region', 'city', 'state', 'country', 'year', 'month', 'day', 'data', 'value'}
                     
                     for word in words:
-                        # Check if it's a common word
-                        if word in common_words:
-                            has_meaningful_word = True
-                            break
-                        
-                        # Check for reasonable vowel-consonant ratio (20-60% vowels is typical)
+                        # Check for reasonable vowel-consonant ratio (20-70% vowels is typical English)
+                        # This avoids hardcoding while catching gibberish like "lklklk" or "zxcvbn"
                         vowels = len([c for c in word if c in 'aeiou'])
                         consonants = len([c for c in word if c.isalpha() and c not in 'aeiou'])
                         if consonants > 0:
                             vowel_ratio = vowels / (vowels + consonants)
-                            if 0.2 <= vowel_ratio <= 0.6 and vowels >= 1:
+                            if 0.2 <= vowel_ratio <= 0.7 and vowels >= 1:
                                 has_meaningful_word = True
                                 break
+                        elif vowels >= 1:  # All vowels is still valid (e.g., "a", "I", "area")
+                            has_meaningful_word = True
+                            break
                     
                     if not has_meaningful_word and len(words) <= 2:
                         is_valid = False
@@ -256,7 +300,7 @@ def create_agent_executor(tools: List[Any]):
             return {
                 **state,
                 "needs_clarification": True,
-                "final_answer": f"❌ Invalid Question\n\n{validation_message}\n\nExamples of valid questions:\n• Which region has the highest claims?\n• What is the average value by category?\n• Show me the top 5 records\n• What trends do you see in the data?",
+                "final_answer": f"❌ Invalid Question\n\n{validation_message}\n\nExamples of valid questions:\n• What is the average value by category?\n• Which item has the highest total?\n• Show me the top 5 records\n• What trends do you see in the data?",
                 "messages": state.get("messages", []) + [
                     {"type": "ai", "content": validation_message}
                 ],
@@ -289,7 +333,7 @@ def create_agent_executor(tools: List[Any]):
             prev_answer = prev_qa.get("answer", "")
             
             # Use LLM to expand the question
-            expander = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
+            expander = GroqWithGeminiFallback(model="llama-3.1-8b-instant", temperature=0.0)
             prompt = get_question_expansion_prompt(
                 prev_question=prev_question,
                 prev_answer=prev_answer[:500],
@@ -503,28 +547,54 @@ def create_agent_executor(tools: List[Any]):
         internal_summary = state.get("internal_summary") or ""
         internal_struct = _coerce_structured_fact(state.get("internal_fact"))
         
-        # Use LLM to judge if internal data is sufficient
-        judge = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
+        # Use LLM to judge if internal data is sufficient (with Gemini fallback)
         prompt = get_search_decision_prompt(
             question=question,
             internal_summary=internal_summary,
             internal_struct=internal_struct
         )
+        
+        decision_text = ""
         try:
+            # Try Groq first
+            judge = GroqWithGeminiFallback(model="llama-3.1-8b-instant", temperature=0.0)
             resp = judge.invoke(prompt)
             decision_text = getattr(resp, "content", str(resp)).strip().upper()
             
-            # Parse decision
-            needs_search = True  # default to searching
-            if decision_text.startswith("YES"):
-                needs_search = False
-                logger.info("Decision: Internal data is sufficient. Skipping external search.")
-            else:
-                logger.info("Decision: External search needed to supplement internal data.")
-                
         except Exception as e:
-            logger.warning(f"Decision node failed: {e}. Defaulting to search.")
-            needs_search = True
+            error_str = str(e).lower()
+            # Check if it's a rate limit error
+            if "429" in str(e) or "rate limit" in error_str or "quota" in error_str:
+                logger.warning(f"Groq rate limit in decision node. Falling back to Gemini.")
+                try:
+                    # Fallback to Gemini
+                    import google.generativeai as genai
+                    genai.configure(api_key=config.GEMINI_API_KEY)
+                    model = genai.GenerativeModel("gemini-2.0-flash-exp")
+                    
+                    # Convert prompt to string
+                    if isinstance(prompt, list):
+                        prompt_text = "\n".join([str(msg.get("content", msg)) if isinstance(msg, dict) else str(msg) for msg in prompt])
+                    else:
+                        prompt_text = str(prompt)
+                    
+                    response = model.generate_content(prompt_text)
+                    decision_text = response.text.strip().upper()
+                    logger.info("Successfully used Gemini fallback for decision node")
+                except Exception as fallback_error:
+                    logger.error(f"Gemini fallback also failed: {fallback_error}. Defaulting to search.")
+                    decision_text = "NO"  # Default to search
+            else:
+                logger.warning(f"Decision node failed: {e}. Defaulting to search.")
+                decision_text = "NO"  # Default to search
+        
+        # Parse decision
+        needs_search = True  # default to searching
+        if decision_text.startswith("YES"):
+            needs_search = False
+            logger.info("Decision: Internal data is sufficient. Skipping external search.")
+        else:
+            logger.info("Decision: External search needed to supplement internal data.")
         
         return {
             **state,

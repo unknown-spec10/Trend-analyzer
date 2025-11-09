@@ -19,6 +19,7 @@ import ast
 import pandas as pd
 from langchain.tools import tool
 from langchain_groq import ChatGroq
+from .groq_wrapper import GroqWithGeminiFallback
 
 from .prompts import get_data_analysis_prompt
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -51,7 +52,7 @@ class DataQueryTool:
         # Instantiate Groq chat model; ignore type checker arg mismatch if stubs differ.
         # temperature=0.2 balances determinism with functionality
         # (0.0-0.1 too conservative and causes errors, 0.3+ introduces too much randomness)
-        self._llm: BaseChatModel = llm or ChatGroq(
+        self._llm: BaseChatModel = llm or GroqWithGeminiFallback(
             model="llama-3.1-8b-instant",
             temperature=0.2
         )  # type: ignore[arg-type]
@@ -331,49 +332,64 @@ class DataQueryTool:
                 "details": {"error": "Missing date/time columns", "question": user_query}
             }
 
-        # Domain keywords which should map to columns
-        domain_keywords = {
-            "region","claim","salary","department","product","revenue","quantity","price","temperature","humidity",
-            "age","gender","smoker","diabetic","bmi","bloodpressure"
-        }
-        mentioned_domain = {t for t in tokens if t in domain_keywords}
+        # Extract potential column references from question tokens
+        # Check if any tokens match actual column names (fully dynamic, no hardcoded keywords)
         matched_columns: set[str] = set()
-        missing_domain: set[str] = set()
-
-        # Matching logic
-        for t in mentioned_domain:
+        
+        # Strategy: Test ALL tokens >= 3 chars against actual columns
+        # Only count as "unmatched" if token looks column-like (capitalized, underscored, or uncommon)
+        # This avoids hardcoding while still filtering noise from common English words
+        
+        potentially_columnar_unmatched: set[str] = set()
+        
+        for t in tokens:
+            if len(t) < 3:
+                continue
+                
+            # Try exact match
             if t in cols_lower:
                 matched_columns.add(col_map[t])
-            else:
-                # try singular/plural heuristics
-                singular = t[:-1] if t.endswith("s") else t
-                plural = t + "s" if not t.endswith("s") else t[:-1]
-                if singular in cols_lower:
-                    matched_columns.add(col_map[singular])
-                elif plural in cols_lower:
-                    matched_columns.add(col_map[plural])
-                else:
-                    # try substring match (e.g., "temperature" matches "temperature_celsius")
-                    substring_match = any(t in col or col.startswith(t) for col in cols_lower)
-                    if substring_match:
-                        # Find the matching column
-                        for col_lower, col_orig in col_map.items():
-                            if t in col_lower or col_lower.startswith(t):
-                                matched_columns.add(col_orig)
-                                break
-                    else:
-                        missing_domain.add(t)
-
-        # If domain terms mentioned but none matched
-        if mentioned_domain and not matched_columns and missing_domain == mentioned_domain:
+                continue
+            
+            # Try singular/plural heuristics
+            singular = t[:-1] if t.endswith("s") and len(t) > 3 else t
+            plural = t + "s" if not t.endswith("s") else t
+            
+            if singular in cols_lower:
+                matched_columns.add(col_map[singular])
+                continue
+            elif plural in cols_lower:
+                matched_columns.add(col_map[plural])
+                continue
+            
+            # Try substring match (e.g., "temperature" matches "temperature_celsius")
+            substring_matches = [col for col in cols_lower if t in col or col.startswith(t) or col in t]
+            if substring_matches:
+                matched_columns.add(col_map[substring_matches[0]])
+                continue
+            
+            # No match - but only track if token looks column-like:
+            # - Contains underscore (common in column names)
+            # - Starts with uppercase (likely proper noun/category value)
+            # - Is relatively long (8+ chars suggests specificity)
+            if "_" in t or t[0].isupper() or len(t) >= 8:
+                potentially_columnar_unmatched.add(t)
+        
+        # Only return error if question has specific column-like references that ALL failed
+        # AND at least 2 such unmatched refs (reduces false positives)
+        if len(potentially_columnar_unmatched) >= 2 and not matched_columns:
             return {
                 "metric": "error",
                 "value": None,
                 "period": "unknown",
                 "segment": "unknown",
                 "unit": "unknown",
-                "summary": "Question references columns not present in dataset",
-                "details": {"missing_columns": sorted(missing_domain), "question": user_query}
+                "summary": "Question may reference columns not present in dataset",
+                "details": {
+                    "unmatched_terms": sorted(potentially_columnar_unmatched),
+                    "question": user_query,
+                    "available_columns": list(df.columns)[:10]  # Show first 10 columns as hint
+                }
             }
 
         return None
@@ -635,7 +651,7 @@ def summarize_text(text: str) -> str:
     if not text or not text.strip():
         return "No text provided to summarize."
     try:
-        llm = ChatGroq(
+        llm = GroqWithGeminiFallback(
             model="llama-3.1-8b-instant",
             temperature=0.3
         )  # type: ignore[arg-type]
